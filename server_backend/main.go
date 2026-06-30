@@ -38,7 +38,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Received Raw Payload: %s\n", message)
 
 		
-		err = ws.WriteMessage(websocket.TextMessage, []byte("Server received: "+string(message)))
+		err = ws.WriteMessage(websocket.TextMessage, message)
 		if err != nil {
 			break
 		}
