@@ -10,7 +10,6 @@ void main() => runApp(MaterialApp(
   home: const DecentralizedChat(),
 ));
 
-// Simple model to track message text alongside local ownership data
 class ChatMessage {
   final String text;
   final bool isMe;
@@ -21,7 +20,7 @@ class ChatPeer {
   final String rawPublicKey;
   final String shortId;
   String nickname;
-  List<ChatMessage> messages = []; // Updated type
+  List<ChatMessage> messages = [];
   ChatPeer(this.rawPublicKey, this.nickname) 
     : shortId = rawPublicKey.substring(rawPublicKey.length - 15);
 }
@@ -67,7 +66,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       if (peerExists) {
         setState(() {
           final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
-          // Prevent duplicates by checking plain text contents
           if (!sender.messages.any((m) => m.text == dec)) {
             sender.messages.add(ChatMessage(dec, false));
           }
@@ -109,7 +107,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 Navigator.pop(ctx);
               }
             },
-            child: const Text('Accept & Open Pipeline', style: TextStyle(color: Colors.black)),
+            child: const Text('Converse', style: TextStyle(color: Colors.black)),
           )
         ],
       ),
@@ -142,7 +140,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           onPressed: () {
             Clipboard.setData(ClipboardData(text: _myRawPublicKey));
             Navigator.pop(ctx);
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Public Key successfully compiled to clipboard!')));
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Public Key successfully copied to clipboard!')));
           },
         )
       ],
@@ -155,9 +153,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       backgroundColor: const Color(0xFF1E1E1E),
       title: const Text('Connect to Public Key Armor'),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: _nameController, decoration: const InputDecoration(hintText: "Give them a Nickname")),
+        TextField(controller: _nameController, decoration: const InputDecoration(hintText: "Give a nickname...")),
         const SizedBox(height: 8),
-        TextField(controller: _keyInputController, decoration: const InputDecoration(hintText: "Paste their Giant Public Key String")),
+        TextField(controller: _keyInputController, decoration: const InputDecoration(hintText: "Paste identity key...")),
       ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
@@ -171,7 +169,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               Navigator.pop(ctx);
             }
           },
-          child: const Text('Secure Link', style: TextStyle(color: Colors.black)),
+          child: const Text('Connect', style: TextStyle(color: Colors.black)),
         )
       ],
     ),
@@ -205,15 +203,21 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             width: 260, color: const Color(0xFF1A1A1A),
             child: SafeArea(
               child: Column(children: [
-                ListTile(
-                  title: const Text('Pipelines', style: TextStyle(fontWeight: FontWeight.bold)),
-                  trailing: IconButton(icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent), onPressed: _showAddPeer),
+                // Wrapped in a fixed height container to align dividers perfectly
+                SizedBox(
+                  height: 72,
+                  child: Center(
+                    child: ListTile(
+                      title: const Text('Morse Messenger', style: TextStyle(fontWeight: FontWeight.bold)),
+                      trailing: IconButton(icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent), onPressed: _showAddPeer),
+                    ),
+                  ),
                 ),
                 const Divider(color: Colors.white10, height: 1),
                 Expanded(child: ListView(children: _peers.map((p) => ListTile(
                   selected: _selectedPeer == p, selectedTileColor: Colors.white10,
                   leading: CircleAvatar(backgroundColor: Colors.tealAccent.withOpacity(0.1), child: Text(p.nickname[0].toUpperCase(), style: const TextStyle(color: Colors.tealAccent))),
-                  title: Text(p.nickname), subtitle: Text('Node: ${p.shortId}', style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+                  title: Text(p.nickname),
                   onTap: () => setState(() => _selectedPeer = p),
                 )).toList())),
                 Padding(
@@ -236,19 +240,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               ? const Center(child: Text('No Active Secure Selection', style: TextStyle(color: Colors.white30)))
               : SafeArea(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    ListTile(title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), subtitle: Text('Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace'))),
+                    // Wrapped in an identical fixed height container (72) to match the left sidebar header layout profile
+                    SizedBox(
+                      height: 72,
+                      child: Center(
+                        child: ListTile(
+                          title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), 
+                          subtitle: Text('Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace'))
+                        ),
+                      ),
+                    ),
                     const Divider(height: 1, color: Colors.white10),
                     Expanded(
                       child: ListView(
                         padding: const EdgeInsets.all(24),
                         children: _selectedPeer!.messages.map((m) => Align(
-                          // If it's my message, align right; else align left
                           alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
                           child: Container(
                             margin: const EdgeInsets.symmetric(vertical: 4), 
                             padding: const EdgeInsets.all(12),
                             decoration: BoxDecoration(
-                              // My messages display darker color variant (0xFF0B0B0B); peer stays standard dark grey
                               color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E), 
                               borderRadius: BorderRadius.circular(12),
                               border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null
