@@ -1,89 +1,92 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:crypton/crypton.dart'; // Import our new crypto tool
+import 'package:crypton/crypton.dart';
 
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF121212),
-        primaryColor: Colors.tealAccent,
       ),
-      home: const CryptoChatScreen(),
+      home: const Chat(),
     );
   }
 }
 
-class CryptoChatScreen extends StatefulWidget {
-  const CryptoChatScreen({super.key});
-
+class Chat extends StatefulWidget {
+  const Chat({super.key});
   @override
-  State<CryptoChatScreen> createState() => _CryptoChatScreenState();
+  State<Chat> createState() => _ChatState();
 }
 
-class _CryptoChatScreenState extends State<CryptoChatScreen> {
+class _ChatState extends State<Chat> {
   final TextEditingController _controller = TextEditingController();
-  final WebSocketChannel _channel = WebSocketChannel.connect(Uri.parse('ws://localhost:8080/ws'));
+  final WebSocketChannel _channel = WebSocketChannel.connect(
+    Uri.parse('ws://localhost:8080/ws'),
+  );
 
   late RSAPrivateKey _myPrivateKey;
-  late RSAPublicKey _myPublicKey;
-  
-  late RSAPublicKey _targetUserPublicKey; 
-  
-  bool _isKeyGenerated = false;
-  String _lastEncryptedPayload = "";
+  late String _myFingerprint;
+  bool _isReady = false;
+
+  List<String> _decryptedMessages = [];
 
   @override
   void initState() {
     super.initState();
-    _generateKeys();
+    _setupIdentity();
   }
 
-  void _generateKeys() {
-    // Generate a 2048-bit secure keypair
+  void _setupIdentity() {
+    // create cryptographic keys
     final keyPair = RSAKeypair.fromRandom();
     _myPrivateKey = keyPair.privateKey;
-    _myPublicKey = keyPair.publicKey;
-    
-    // Pretend our friend's public key is our own for this local loop test
-    _targetUserPublicKey = _myPublicKey; 
+    // compress the public key into a clean string ID format (fingerprint, basically)
+    _myFingerprint = keyPair.publicKey.toString().substring(30, 80);
+
+    // tell server who we are
+    var registerPacket = {
+      "type": "register",
+      "fromUser": _myFingerprint,
+      "toUser": "",
+      "payload": "",
+    };
+    _channel.sink.add(jsonEncode(registerPacket));
 
     setState(() {
-      _isKeyGenerated = true;
+      _isReady = true;
     });
   }
 
-  void _sendEncryptedMessage() {
+  void _sendMessage() {
     if (_controller.text.isNotEmpty) {
       String plainText = _controller.text;
 
-      // ENCRYPT the text using the target user's Public Key
-      // This turns "hello" into unreadable cipher text
-      String cipherText = _targetUserPublicKey.encrypt(plainText);
+      // the test is solely based on myself, since I have no one to test this with :D
+      String encryptedPayload = _myPrivateKey.publicKey.encrypt(plainText);
 
-      setState(() {
-        _lastEncryptedPayload = cipherText;
-      });
+      var messagePacket = {
+        "type": "message",
+        "fromUser": _myFingerprint,
+        "toUser": _myFingerprint,
+        "payload": encryptedPayload,
+      };
 
-      // Send the SCRAMBLED text over the internet to the server
-      _channel.sink.add(cipherText);
+      _channel.sink.add(jsonEncode(messagePacket));
       _controller.clear();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_isKeyGenerated) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator(color: Colors.tealAccent)));
-    }
+    if (!_isReady)
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
 
     return Scaffold(
       body: SafeArea(
@@ -94,77 +97,91 @@ class _CryptoChatScreenState extends State<CryptoChatScreen> {
             children: [
               const Text(
                 'Morse Messenger',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.tealAccent,
+                ),
               ),
               const SizedBox(height: 4),
               Text(
-                'Your Fingerprint: ${_myPublicKey.toString().substring(30, 50)}...',
-                style: const TextStyle(color: Colors.white54, fontSize: 11, fontFamily: 'monospace'),
-              ),
-              const Divider(height: 32, color: Colors.white24),
-              
-              const Text("What leaves your device (Encrypted):", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.amberAccent)),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(12),
-                width: double.infinity,
-                decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
-                child: Text(
-                  _lastEncryptedPayload.isEmpty ? "No payload sent yet..." : _lastEncryptedPayload,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                'Fingerprint ID:\n$_myFingerprint',
+                style: const TextStyle(
+                  color: Colors.white30,
+                  fontSize: 10,
+                  fontFamily: 'monospace',
                 ),
               ),
+              const Divider(height: 32, color: Colors.white24),
 
-              const SizedBox(height: 24),
-              const Text("Server reply (Decrypted client-side):", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.greenAccent)),
-              
               Expanded(
                 child: StreamBuilder(
                   stream: _channel.stream,
                   builder: (context, snapshot) {
-                    if (!snapshot.hasData) {
-                      return const Center(child: Text('Send an encrypted packet...'));
+                    if (snapshot.hasData) {
+                      // we received a JSON packet back from the server
+                      var incomingData = jsonDecode(snapshot.data.toString());
+                      String cipherText = incomingData['payload'];
+
+                      // try to decrypt it locally
+                      try {
+                        String decrypted = _myPrivateKey.decrypt(cipherText);
+                        // add it to our display list if it's new
+                        if (!_decryptedMessages.contains(decrypted)) {
+                          _decryptedMessages.add(decrypted);
+                        }
+                      } catch (e) {
+                        // if it wasn't encrypted with our key, it throws an error
+                      }
                     }
 
-                    // The server echoes back the exact scrambled message string it received
-                    String rawServerEcho = snapshot.data.toString();
-                    
-                    // Since the server doesn't send "Server received: " anymore for raw crypto, 
-                    // we directly decrypt the incoming data package using OUR private key.
-                    try {
-                      String decryptedText = _myPrivateKey.decrypt(rawServerEcho);
-                      return Center(
-                        child: Text(
-                          "Decrypted Cleartext: \"$decryptedText\"",
-                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                      );
-                    } catch (e) {
-                      return const Center(child: Text("Failed to decrypt incoming payload. Keys mismatch."));
-                    }
+                    return ListView.builder(
+                      itemCount: _decryptedMessages.length,
+                      itemBuilder: (context, index) {
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 4.0),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF1E1E1E),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                _decryptedMessages[index],
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
                   },
                 ),
               ),
-              
+
               Row(
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _controller,
                       decoration: InputDecoration(
-                        hintText: 'Type message...',
-                        hintStyle: const TextStyle(color: Colors.white30),
+                        hintText: 'Type a message...',
                         filled: true,
                         fillColor: const Color(0xFF1E1E1E),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
                       ),
                     ),
                   ),
                   const SizedBox(width: 12),
                   FloatingActionButton(
                     backgroundColor: Colors.tealAccent,
-                    onPressed: _sendEncryptedMessage,
-                    child: const Icon(Icons.lock, color: Colors.black),
+                    onPressed: _sendMessage,
+                    child: const Icon(Icons.send, color: Colors.black),
                   ),
                 ],
               ),
@@ -173,12 +190,5 @@ class _CryptoChatScreenState extends State<CryptoChatScreen> {
         ),
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _channel.sink.close();
-    _controller.dispose();
-    super.dispose();
   }
 }
