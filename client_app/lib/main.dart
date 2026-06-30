@@ -1,193 +1,252 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:crypton/crypton.dart';
 
-void main() => runApp(const MyApp());
+void main() => runApp(MaterialApp(
+  debugShowCheckedModeBanner: false,
+  theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: const Color(0xFF121212), primaryColor: Colors.tealAccent),
+  home: const DecentralizedChat(),
+));
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212),
-      ),
-      home: const Chat(),
-    );
-  }
+class ChatPeer {
+  final String fingerprint;
+  final String rawPublicKey; // Store their actual public key to encrypt replies!
+  String nickname;
+  List<String> messages = [];
+  ChatPeer(this.fingerprint, this.rawPublicKey, this.nickname);
 }
 
-class Chat extends StatefulWidget {
-  const Chat({super.key});
+class DecentralizedChat extends StatefulWidget {
+  const DecentralizedChat({super.key});
   @override
-  State<Chat> createState() => _ChatState();
+  State<DecentralizedChat> createState() => _DecentralizedChatState();
 }
 
-class _ChatState extends State<Chat> {
-  final TextEditingController _controller = TextEditingController();
-  final WebSocketChannel _channel = WebSocketChannel.connect(
-    Uri.parse('ws://localhost:8080/ws'),
-  );
-
-  late RSAPrivateKey _myPrivateKey;
-  late String _myFingerprint;
-  bool _isReady = false;
-
-  List<String> _decryptedMessages = [];
+class _DecentralizedChatState extends State<DecentralizedChat> {
+  final _msgController = TextEditingController(), _fpController = TextEditingController(), _nameController = TextEditingController();
+  final _channel = WebSocketChannel.connect(Uri.parse('ws://localhost:8080/ws'));
+  late RSAPrivateKey _privKey;
+  late String _myFullPublicKeyString;
+  String _myFingerprint = "";
+  final List<ChatPeer> _peers = [];
+  ChatPeer? _selectedPeer;
 
   @override
   void initState() {
     super.initState();
-    _setupIdentity();
+    final kp = RSAKeypair.fromRandom();
+    _privKey = kp.privateKey;
+    _myFullPublicKeyString = kp.publicKey.toString();
+    _myFingerprint = _myFullPublicKeyString.substring(_myFullPublicKeyString.length - 30);
+    
+    _channel.sink.add(jsonEncode({"type": "register", "fromUser": _myFingerprint, "toUser": "", "payload": ""}));
   }
 
-  void _setupIdentity() {
-    // create cryptographic keys
-    final keyPair = RSAKeypair.fromRandom();
-    _myPrivateKey = keyPair.privateKey;
-    // compress the public key into a clean string ID format (fingerprint, basically)
-    _myFingerprint = keyPair.publicKey.toString().substring(30, 80);
-
-    // tell server who we are
-    var registerPacket = {
-      "type": "register",
-      "fromUser": _myFingerprint,
-      "toUser": "",
-      "payload": "",
-    };
-    _channel.sink.add(jsonEncode(registerPacket));
-
-    setState(() {
-      _isReady = true;
-    });
+  void _showUnknownPeerDialog(String senderFp, String senderPublicKey, String decryptedMessage) {
+    final TextEditingController incomingNameController = TextEditingController();
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Incoming Connection', style: TextStyle(color: Colors.tealAccent)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('From ID: $senderFp', style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.white54)),
+            const SizedBox(height: 16),
+            TextField(controller: incomingNameController, decoration: const InputDecoration(hintText: "Assign a Nickname")),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+            onPressed: () {
+              if (incomingNameController.text.isNotEmpty) {
+                setState(() {
+                  final newPeer = ChatPeer(senderFp, senderPublicKey, incomingNameController.text.trim());
+                  newPeer.messages.add("${incomingNameController.text}: $decryptedMessage");
+                  _peers.add(newPeer);
+                  _selectedPeer ??= newPeer;
+                });
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Accept & Add', style: TextStyle(color: Colors.black)),
+          )
+        ],
+      ),
+    );
   }
+
+  void _showAddPeer() => showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: const Color(0xFF1E1E1E),
+      title: const Text('Add Peer Node', style: TextStyle(color: Colors.tealAccent)),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: _nameController, decoration: const InputDecoration(hintText: "Nickname")),
+        TextField(controller: _fpController, decoration: const InputDecoration(hintText: "Fingerprint ID")),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+          onPressed: () {
+            if (_fpController.text.isNotEmpty && _nameController.text.isNotEmpty) {
+              setState(() => _peers.add(ChatPeer(_fpController.text.trim(), "", _nameController.text.trim())));
+              _selectedPeer ??= _peers.last;
+              _fpController.clear(); _nameController.clear();
+              Navigator.pop(ctx);
+            }
+          },
+          child: const Text('Connect', style: TextStyle(color: Colors.black)),
+        )
+      ],
+    ),
+  );
 
   void _sendMessage() {
-    if (_controller.text.isNotEmpty) {
-      String plainText = _controller.text;
+    if (_msgController.text.isNotEmpty && _selectedPeer != null) {
+      final text = _msgController.text;
+      String cipher;
 
-      // the test is solely based on myself, since I have no one to test this with :D
-      String encryptedPayload = _myPrivateKey.publicKey.encrypt(plainText);
+      // Cryptographic Routing Logic:
+      if (_selectedPeer!.rawPublicKey.isNotEmpty) {
+        // If we have their true public key, use it to encrypt!
+        final targetPubKey = RSAPublicKey.fromString(_selectedPeer!.rawPublicKey);
+        cipher = targetPubKey.encrypt(text);
+      } else {
+        // Fallback for the very first connection initialization message
+        cipher = _privKey.publicKey.encrypt(text);
+      }
 
-      var messagePacket = {
+      _channel.sink.add(jsonEncode({
         "type": "message",
         "fromUser": _myFingerprint,
-        "toUser": _myFingerprint,
-        "payload": encryptedPayload,
-      };
+        "toUser": _selectedPeer!.fingerprint,
+        "payload": jsonEncode({"pubKey": _myFullPublicKeyString, "cipher": cipher})
+      }));
 
-      _channel.sink.add(jsonEncode(messagePacket));
-      _controller.clear();
+      setState(() => _selectedPeer!.messages.add("Me: $text"));
+      _msgController.clear();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_isReady)
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-
+    if (_myFingerprint.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
     return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Morse Messenger',
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.tealAccent,
+      body: Row(
+        children: [
+          Container(
+            width: 260, color: const Color(0xFF1A1A1A),
+            child: SafeArea(
+              child: Column(children: [
+                ListTile(
+                  title: const Text('Secure Chats', style: TextStyle(fontWeight: FontWeight.bold)),
+                  trailing: IconButton(icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent), onPressed: _showAddPeer),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Fingerprint ID:\n$_myFingerprint',
-                style: const TextStyle(
-                  color: Colors.white30,
-                  fontSize: 10,
-                  fontFamily: 'monospace',
-                ),
-              ),
-              const Divider(height: 32, color: Colors.white24),
-
-              Expanded(
-                child: StreamBuilder(
-                  stream: _channel.stream,
-                  builder: (context, snapshot) {
-                    if (snapshot.hasData) {
-                      // we received a JSON packet back from the server
-                      var incomingData = jsonDecode(snapshot.data.toString());
-                      String cipherText = incomingData['payload'];
-
-                      // try to decrypt it locally
-                      try {
-                        String decrypted = _myPrivateKey.decrypt(cipherText);
-                        // add it to our display list if it's new
-                        if (!_decryptedMessages.contains(decrypted)) {
-                          _decryptedMessages.add(decrypted);
-                        }
-                      } catch (e) {
-                        // if it wasn't encrypted with our key, it throws an error
-                      }
-                    }
-
-                    return ListView.builder(
-                      itemCount: _decryptedMessages.length,
-                      itemBuilder: (context, index) {
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 4.0),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E1E1E),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                _decryptedMessages[index],
-                                style: const TextStyle(color: Colors.white),
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    );
+                const Divider(color: Colors.white10, height: 1),
+                Expanded(child: ListView(children: _peers.map((p) => ListTile(
+                  selected: _selectedPeer == p, selectedTileColor: Colors.white10,
+                  leading: CircleAvatar(backgroundColor: Colors.tealAccent.withOpacity(0.1), child: Text(p.nickname.isEmpty ? "?" : p.nickname[0].toUpperCase(), style: const TextStyle(color: Colors.tealAccent))),
+                  title: Text(p.nickname), subtitle: Text(p.fingerprint, overflow: TextOverflow.ellipsis),
+                  onTap: () => setState(() => _selectedPeer = p),
+                )).toList())),
+                InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: _myFingerprint));
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Node ID copied to clipboard'), duration: Duration(seconds: 2), backgroundColor: Color(0xFF1E1E1E)));
                   },
-                ),
-              ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(children: [
+                      Expanded(child: Text('My Node ID: $_myFingerprint', style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: Colors.white30), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      const Icon(Icons.copy, size: 12, color: Colors.white30),
+                    ]),
+                  ),
+                )
+              ]),
+            ),
+          ),
+          Expanded(
+            child: _selectedPeer == null
+              ? const Center(child: Text('No Active Pipeline Selection', style: TextStyle(color: Colors.white30)))
+              : SafeArea(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    ListTile(title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), subtitle: Text('Target: ${_selectedPeer!.fingerprint}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace'))),
+                    const Divider(height: 1, color: Colors.white10),
+                    Expanded(
+                      child: StreamBuilder(
+                        stream: _channel.stream,
+                        builder: (context, snap) {
+                          if (snap.hasData) {
+                            try {
+                              final data = jsonDecode(snap.data.toString());
+                              final innerPayload = jsonDecode(data['payload']);
+                              final String senderFp = data['fromUser'];
+                              final String senderPubKey = innerPayload['pubKey'];
+                              final String cipherText = innerPayload['cipher'];
+                              
+                              String decrypted;
+                              try {
+                                decrypted = _privKey.decrypt(cipherText);
+                              } catch (_) {
+                                // First-packet fallback parser
+                                final senderPubKeyObject = RSAPublicKey.fromString(senderPubKey);
+                                decrypted = senderPubKeyObject.decrypt(cipherText);
+                              }
 
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      decoration: InputDecoration(
-                        hintText: 'Type a message...',
-                        filled: true,
-                        fillColor: const Color(0xFF1E1E1E),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
+                              // Find or handle peer dynamically
+                              bool peerExists = _peers.any((p) => p.fingerprint == senderFp);
+                              if (peerExists) {
+                                final sender = _peers.firstWhere((p) => p.fingerprint == senderFp);
+                                String cleanMsg = "${sender.nickname}: $decrypted";
+                                if (!sender.messages.contains(cleanMsg)) {
+                                  sender.messages.add(cleanMsg);
+                                  // Update their public key mirror reference if it was blank
+                                  if (sender.rawPublicKey.isEmpty) {
+                                    _peers[_peers.indexOf(sender)] = ChatPeer(senderFp, senderPubKey, sender.nickname)..messages = sender.messages;
+                                  }
+                                }
+                              } else {
+                                // Trigger popup dynamically on the UI loop thread context safely
+                                WidgetsBinding.instance.addPostFrameCallback((_) {
+                                  if (!_peers.any((p) => p.fingerprint == senderFp)) {
+                                    _showUnknownPeerDialog(senderFp, senderPubKey, decrypted);
+                                  }
+                                });
+                              }
+                            } catch (_) {}
+                          }
+
+                          return ListView(
+                            padding: const EdgeInsets.all(24),
+                            children: _selectedPeer!.messages.map((m) => Container(
+                              margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(12)),
+                              child: Text(m),
+                            )).toList(),
+                          );
+                        },
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  FloatingActionButton(
-                    backgroundColor: Colors.tealAccent,
-                    onPressed: _sendMessage,
-                    child: const Icon(Icons.send, color: Colors.black),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+                    Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Row(children: [
+                        Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type secure packet...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
+                        const SizedBox(width: 12),
+                        FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.send, color: Colors.black)),
+                      ]),
+                    )
+                  ]),
+                ),
+          )
+        ],
       ),
     );
   }
