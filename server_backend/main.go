@@ -4,26 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings" // Ensure this is imported
 	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
-// define what our data packets look like
 type Packet struct {
 	Type     string `json:"type"`     // "register" or "message"
-	FromUser string `json:"fromUser"` // sender's public key fingerprint
-	ToUser   string `json:"toUser"`   // recipient's public key fingerprint
-	Payload  string `json:"payload"`  // the encrypted scrambled text
+	FromUser string `json:"fromUser"` // sender's full Raw Public Key
+	ToUser   string `json:"toUser"`   // recipient's full Raw Public Key
+	Payload  string `json:"payload"`  // ciphertext payload
 }
 
-// a secure, thread-safe phone book to store active user connections
 var clients = make(map[string]*websocket.Conn)
 var mutex = &sync.Mutex{}
-
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
@@ -32,52 +28,45 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	var userFingerprint string
+	var userIdentity string
 
 	for {
 		_, message, err := ws.ReadMessage()
 		if err != nil {
-			// clean up when a user disconnects
-			if userFingerprint != "" {
+			if userIdentity != "" {
 				mutex.Lock()
-				delete(clients, userFingerprint)
+				delete(clients, userIdentity)
 				mutex.Unlock()
-				fmt.Printf("User [%s] disconnected.\n", userFingerprint[:10])
+				fmt.Printf("Node disconnected: [%s...]\n", userIdentity[:15])
 			}
 			break
 		}
 
-		// read the JSON packet sent by the app
-		var packet Packet
-		err = json.Unmarshal(message, &packet)
-		if err != nil {
-			fmt.Println("Error reading packet format:", err)
+		var p Packet
+		if err := json.Unmarshal(message, &p); err != nil {
 			continue
 		}
 
-		switch packet.Type {
+		switch p.Type {
 		case "register":
-			// register the user's connection in our phone book
-			userFingerprint = packet.FromUser
+			userIdentity = strings.TrimSpace(p.FromUser) // clean registration key
 			mutex.Lock()
-			clients[userFingerprint] = ws
+			clients[userIdentity] = ws
 			mutex.Unlock()
-			fmt.Printf("Node Registered Identity: [%s...]\n", userFingerprint[:15])
+			fmt.Printf("Registered Connection Pipeline for Public Key: [%s...]\n", userIdentity[:25])
 
 		case "message":
-			fmt.Printf("Routing packet from [%s...] to [%s...]\n", packet.FromUser[:8], packet.ToUser[:8])
-			
-			// look up the recipient in our phone book
+			targetUser := strings.TrimSpace(p.ToUser) // clean routing key
 			mutex.Lock()
-			recipientConn, found := clients[packet.ToUser]
+			recipientConn, found := clients[targetUser]
 			mutex.Unlock()
 
 			if found {
-				// forward the exact raw encrypted packet to the recipient
-				packetBytes, _ := json.Marshal(packet)
+				packetBytes, _ := json.Marshal(p)
 				recipientConn.WriteMessage(websocket.TextMessage, packetBytes)
+				fmt.Printf("Routed pure p2p packet directly to: [%s...]\n", targetUser[:15])
 			} else {
-				fmt.Println("Recipient is offline. (In future, we will cache this!)")
+				fmt.Printf("Target node [%s...] is currently offline.\n", targetUser[:15])
 			}
 		}
 	}
@@ -85,6 +74,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/ws", handleConnections)
-	fmt.Println("Routing node running on :8080")
+	fmt.Println("🚀 Pure Asymmetric P2P Routing Node running on :8080")
 	http.ListenAndServe(":8080", nil)
 }
