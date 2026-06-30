@@ -10,11 +10,18 @@ void main() => runApp(MaterialApp(
   home: const DecentralizedChat(),
 ));
 
+// Simple model to track message text alongside local ownership data
+class ChatMessage {
+  final String text;
+  final bool isMe;
+  ChatMessage(this.text, this.isMe);
+}
+
 class ChatPeer {
   final String rawPublicKey;
   final String shortId;
   String nickname;
-  List<String> messages = [];
+  List<ChatMessage> messages = []; // Updated type
   ChatPeer(this.rawPublicKey, this.nickname) 
     : shortId = rawPublicKey.substring(rawPublicKey.length - 15);
 }
@@ -42,10 +49,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     _myRawPublicKey = kp.publicKey.toString().trim();
     _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
     
-    // 1. Register with backend
     _channel.sink.add(jsonEncode({"type": "register", "fromUser": _myRawPublicKey, "toUser": "", "payload": ""}));
 
-    // 2. GLOBAL LISTEN: Captures background packets even if no chats are open or selected
     _channel.stream.listen((rawData) {
       _handleIncomingPacket(rawData.toString());
     });
@@ -62,7 +67,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       if (peerExists) {
         setState(() {
           final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
-          if (!sender.messages.contains(dec)) sender.messages.add("${sender.nickname}: $dec");
+          // Prevent duplicates by checking plain text contents
+          if (!sender.messages.any((m) => m.text == dec)) {
+            sender.messages.add(ChatMessage(dec, false));
+          }
         });
       } else {
         _showUnknownPeerDialog(senderPublicKey, dec);
@@ -94,7 +102,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               if (incomingNameController.text.isNotEmpty) {
                 setState(() {
                   final newPeer = ChatPeer(senderPublicKey, incomingNameController.text.trim());
-                  newPeer.messages.add("${newPeer.nickname}: $initialMessage");
+                  newPeer.messages.add(ChatMessage(initialMessage, false));
                   _peers.add(newPeer);
                   _selectedPeer ??= newPeer;
                 });
@@ -112,13 +120,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: const Color(0xFF1E1E1E),
-      title: Row(
-        children: [
-          const Text('My Cryptographic Identity', style: TextStyle(fontSize: 16)),
-          const Spacer(),
-          Text('ID: $_myShortId', style: const TextStyle(fontSize: 12, color: Colors.tealAccent, fontFamily: 'monospace')),
-        ],
-      ),
+      title: Row(children: [
+        const Text('My Cryptographic Identity', style: TextStyle(fontSize: 16)),
+        const Spacer(),
+        Text('ID: $_myShortId', style: const TextStyle(fontSize: 12, color: Colors.tealAccent, fontFamily: 'monospace')),
+      ]),
       content: Container(
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8)),
@@ -184,7 +190,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         "payload": enc
       }));
       
-      setState(() { _selectedPeer!.messages.add("Me: $text"); });
+      setState(() { _selectedPeer!.messages.add(ChatMessage(text, true)); });
       _msgController.clear();
     }
   }
@@ -235,10 +241,20 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                     Expanded(
                       child: ListView(
                         padding: const EdgeInsets.all(24),
-                        children: _selectedPeer!.messages.map((m) => Container(
-                          margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(12)),
-                          child: Text(m),
+                        children: _selectedPeer!.messages.map((m) => Align(
+                          // If it's my message, align right; else align left
+                          alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4), 
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              // My messages display darker color variant (0xFF0B0B0B); peer stays standard dark grey
+                              color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E), 
+                              borderRadius: BorderRadius.circular(12),
+                              border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null
+                            ),
+                            child: Text(m.text),
+                          ),
                         )).toList(),
                       ),
                     ),
