@@ -4,6 +4,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:crypton/crypton.dart';
 import 'models.dart';
 import 'dialogs.dart';
+import 'storage_service.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -23,12 +24,33 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   @override
   void initState() {
     super.initState();
-    final kp = RSAKeypair.fromRandom();
-    _privKey = kp.privateKey;
-    _myRawPublicKey = kp.publicKey.toString().trim();
-    _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
-    
-    _channel.sink.add(jsonEncode({"type": "register", "fromUser": _myRawPublicKey, "toUser": "", "payload": ""}));
+    _loadOrCreateIdentity();
+  }
+
+  void _loadOrCreateIdentity() async {
+    String? savedKeyPem = await StorageService.readPrivateKey();
+    RSAKeypair kp;
+
+    if (savedKeyPem != null) {
+      final privateKeyObj = RSAPrivateKey.fromString(savedKeyPem);
+      kp = RSAKeypair(privateKeyObj);
+    } else {
+      kp = RSAKeypair.fromRandom();
+      await StorageService.savePrivateKey(kp.privateKey.toString());
+    }
+
+    setState(() {
+      _privKey = kp.privateKey;
+      _myRawPublicKey = kp.publicKey.toString().trim();
+      _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
+    });
+
+    _channel.sink.add(jsonEncode({
+      "type": "register", 
+      "fromUser": _myRawPublicKey, 
+      "toUser": "", 
+      "payload": ""
+    }));
 
     _channel.stream.listen((rawData) {
       _handleIncomingPacket(rawData.toString());
@@ -40,11 +62,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       final data = jsonDecode(rawData);
       final String senderPublicKey = data['fromUser'].toString().trim();
       
-      // Decrypt the core wrapper
       final decryptedPayload = _privKey.decrypt(data['payload']);
       final Map<String, dynamic> payloadMap = jsonDecode(decryptedPayload);
 
-      // 1. Process receipt notifications
       if (payloadMap['isReceipt'] == true) {
         final String targetMsgId = payloadMap['msgId'];
         setState(() {
@@ -55,7 +75,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         return;
       }
 
-      // 2. Process text messages using the sender's absolute original timestamp
       final String messageText = payloadMap['text'];
       final String msgId = payloadMap['msgId'];
       final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
@@ -96,7 +115,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   void _sendReadReceipt(String targetKey, String messageId) {
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
     
-    // Package receipt data inside the encrypted channel stream payload
     final receiptPayload = jsonEncode({
       "isReceipt": true,
       "msgId": messageId,
@@ -129,7 +147,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       
       final recipientPublicKeyObj = RSAPublicKey.fromString(_selectedPeer!.rawPublicKey.trim());
       
-      // Bundle text and metadata into a secure payload map before asymmetric encrypting
       final messagePayload = jsonEncode({
         "isReceipt": false,
         "text": text,
