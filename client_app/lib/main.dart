@@ -84,16 +84,21 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E1E1E),
-        title: const Text('Incoming Pipeline Link', style: TextStyle(color: Colors.tealAccent)),
+        title: const Text('Incoming Message Request', style: TextStyle(color: Colors.tealAccent)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('From Node Short-ID: $shortSenderId', style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text('From Short-ID: $shortSenderId', style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            TextField(controller: incomingNameController, decoration: const InputDecoration(hintText: "Assign a Nickname")),
+            TextField(controller: incomingNameController, decoration: const InputDecoration(hintText: "Assign a Nickname...")),
           ],
         ),
         actions: [
+          // Added Decline Button to safely dismiss the incoming prompt
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Decline', style: TextStyle(color: Colors.white60)),
+          ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
             onPressed: () {
@@ -119,9 +124,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     builder: (ctx) => AlertDialog(
       backgroundColor: const Color(0xFF1E1E1E),
       title: Row(children: [
-        const Text('My Cryptographic Identity', style: TextStyle(fontSize: 16)),
+        const Text('My Identity', style: TextStyle(fontSize: 16)),
         const Spacer(),
-        Text('ID: $_myShortId', style: const TextStyle(fontSize: 12, color: Colors.tealAccent, fontFamily: 'monospace')),
+        Text('Short-ID: $_myShortId', style: const TextStyle(fontSize: 12, color: Colors.tealAccent, fontFamily: 'monospace')),
       ]),
       content: Container(
         padding: const EdgeInsets.all(8),
@@ -136,7 +141,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         ElevatedButton.icon(
           style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
           icon: const Icon(Icons.copy, size: 16, color: Colors.black),
-          label: const Text('Copy Key Armor', style: TextStyle(color: Colors.black)),
+          label: const Text('Copy Identity', style: TextStyle(color: Colors.black)),
           onPressed: () {
             Clipboard.setData(ClipboardData(text: _myRawPublicKey));
             Navigator.pop(ctx);
@@ -153,9 +158,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       backgroundColor: const Color(0xFF1E1E1E),
       title: const Text('Connect to Public Key Armor'),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: _nameController, decoration: const InputDecoration(hintText: "Give a nickname...")),
+        TextField(controller: _nameController, decoration: const InputDecoration(hintText: "Assign a Nickname...")),
         const SizedBox(height: 8),
-        TextField(controller: _keyInputController, decoration: const InputDecoration(hintText: "Paste identity key...")),
+        TextField(controller: _keyInputController, decoration: const InputDecoration(hintText: "Paste Identity key...")),
       ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
@@ -163,10 +168,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
           onPressed: () {
             if (_keyInputController.text.isNotEmpty && _nameController.text.isNotEmpty) {
-              setState(() => _peers.add(ChatPeer(_keyInputController.text.trim(), _nameController.text.trim())));
-              _selectedPeer ??= _peers.last;
-              _keyInputController.clear(); _nameController.clear();
-              Navigator.pop(ctx);
+              final inputKey = _keyInputController.text.trim();
+              
+              // Verify if the public key already exists in our chat tracker
+              bool alreadyExists = _peers.any((p) => p.rawPublicKey.trim() == inputKey);
+              
+              if (alreadyExists) {
+                setState(() {
+                  _selectedPeer = _peers.firstWhere((p) => p.rawPublicKey.trim() == inputKey);
+                });
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Chat with this key already exists! Switching to chat.')),
+                );
+              } else {
+                setState(() => _peers.add(ChatPeer(inputKey, _nameController.text.trim())));
+                _selectedPeer ??= _peers.last;
+                Navigator.pop(ctx);
+              }
+              _keyInputController.clear(); 
+              _nameController.clear();
             }
           },
           child: const Text('Connect', style: TextStyle(color: Colors.black)),
@@ -203,7 +224,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             width: 260, color: const Color(0xFF1A1A1A),
             child: SafeArea(
               child: Column(children: [
-                // Wrapped in a fixed height container to align dividers perfectly
                 SizedBox(
                   height: 72,
                   child: Center(
@@ -240,7 +260,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               ? const Center(child: Text('No Active Secure Selection', style: TextStyle(color: Colors.white30)))
               : SafeArea(
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    // Wrapped in an identical fixed height container (72) to match the left sidebar header layout profile
                     SizedBox(
                       height: 72,
                       child: Center(
@@ -272,7 +291,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                     Padding(
                       padding: const EdgeInsets.all(24.0),
                       child: Row(children: [
-                        Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type secure packet...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
+                        Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
                         const SizedBox(width: 12),
                         FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.lock, color: Colors.black)),
                       ]),
