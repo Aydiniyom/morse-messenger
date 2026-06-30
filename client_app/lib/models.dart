@@ -1,7 +1,16 @@
+import 'dart:math';
+
 class ChatMessage {
+  final String id; 
   final String text;
   final bool isMe;
-  ChatMessage(this.text, this.isMe);
+  final DateTime timestamp; 
+  bool isRead;              
+
+  ChatMessage(this.text, this.isMe, {DateTime? customTime, String? customId})
+      : timestamp = customTime ?? DateTime.now(),
+        isRead = false,
+        id = customId ?? "${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(10000)}";
 }
 
 class ChatPeer {
