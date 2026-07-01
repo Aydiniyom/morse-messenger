@@ -32,12 +32,22 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   String _myShortId = "";
   bool _autoScroll = true;
   bool _isMobileSidebarExpanded = false;
+  bool _isMessageEmpty = true;
 
   @override
   void initState() {
     super.initState();
     _ipController.text = _serverIp;
     _loadOrCreateIdentity();
+
+    _msgController.addListener(() {
+      final isEmpty = _msgController.text.trim().isEmpty;
+      if (_isMessageEmpty != isEmpty) {
+        setState(() {
+          _isMessageEmpty = isEmpty;
+        });
+      }
+    });
   }
 
   @override
@@ -568,7 +578,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       return const Expanded(
         child: Center(
           child: Text(
-            'No Active Secure Selection',
+            'No Chat Selected',
             style: TextStyle(color: Colors.white30),
           ),
         ),
@@ -710,8 +720,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           ),
           const SizedBox(width: 12),
           FloatingActionButton(
-            backgroundColor: Colors.tealAccent,
-            onPressed: _sendMessage,
+            backgroundColor: _isMessageEmpty ? Colors.white30 : Colors.tealAccent,
+            onPressed: _isMessageEmpty ? null : _sendMessage,
             child: const Icon(Icons.send_rounded, color: Colors.black),
           ),
         ],
