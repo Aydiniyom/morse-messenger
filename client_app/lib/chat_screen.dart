@@ -70,7 +70,12 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     });
 
     try {
-      final channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
+      // Cleanly parse out the scheme without losing any explicit pathing suffixes if provided
+      final wsUrl = _serverIp.startsWith("ws://") || _serverIp.startsWith("wss://")
+          ? _serverIp
+          : _serverIp.endsWith('/ws') ? "ws://$_serverIp" : "ws://$_serverIp/ws";
+
+      final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
       _channel = channel;
 
       await channel.ready;
@@ -79,6 +84,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         _isServerConnected = true;
         _isConnecting = false;
       });
+
+      // --- PERSIST THE IP ADDRESS THE SECOND CONNECTION IS VERIFIED ---
+      StorageService.saveServerIp(_serverIp);
 
       _channel!.sink.add(
         jsonEncode({
@@ -138,17 +146,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       await StorageService.savePrivateKey(kp.privateKey.toString());
     }
 
-    // Load old peers list asynchronously out of Hive storage memory
+    // 1. Fetch saved contacts list
     final savedPeers = await StorageService.fetchPeerList();
     final List<ChatPeer> hydratedPeers = savedPeers.map((data) {
       return ChatPeer(data['publicKey']!, data['nickname']!);
     }).toList();
 
+    // 2. Fetch the saved Server IP address from Hive
+    final String? savedIp = await StorageService.fetchServerIp();
+
     setState(() {
       _privKey = kp.privateKey;
       _myRawPublicKey = kp.publicKey.toString().trim();
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
-      _peers.addAll(hydratedPeers); // Restores your sidebar UI!
+      _peers.addAll(hydratedPeers);
+      
+      // 3. If an IP was saved before, override the default "localhost:8080"
+      if (savedIp != null && savedIp.isNotEmpty) {
+        _serverIp = savedIp;
+        _ipController.text = savedIp;
+      }
     });
 
     _initializeWebSocket();
@@ -860,32 +877,22 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: GestureDetector(
         onTap: () async {
+          // 1. Fetch historical database records
           final records = await StorageService.fetchHistory(p.rawPublicKey);
           List<ChatMessage> loadedMessages = [];
+          
           for (var record in records) {
-            try {
-              final decryptedPayload = _privKey.decrypt(record['payload']);
-              final Map<String, dynamic> payloadMap = jsonDecode(
-                decryptedPayload,
-              );
-              loadedMessages.add(
-                ChatMessage(
-                  payloadMap['text'] ?? '',
-                  record['isMe'] == true,
-                  customTime: DateTime.parse(record['timestamp']),
-                  customId: record['id'],
-                )..isRead = record['isRead'] == true,
-              );
-            } catch (_) {
-              loadedMessages.add(
-                ChatMessage(
-                  "[Undecryptable payload]",
-                  record['isMe'] == true,
-                  customTime: DateTime.parse(record['timestamp']),
-                  customId: record['id'],
-                ),
-              );
-            }
+            // 2. Read the clean cleartext payload directly without legacy RSA decryption
+            final String messageText = record['payload'] ?? '';
+
+            loadedMessages.add(
+              ChatMessage(
+                messageText,
+                record['isMe'] == true,
+                customTime: DateTime.parse(record['timestamp']),
+                customId: record['id'],
+              )..isRead = record['isRead'] == true,
+            );
           }
 
           setState(() {
@@ -893,7 +900,16 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             _selectedPeer = p;
             _autoScroll = true;
           });
+          
           _scrollToBottom();
+
+          // 3. Send read receipts for any newly viewed unread messages
+          for (var m in p.messages) {
+            if (!m.isMe && !m.isRead) {
+              _sendReadReceipt(p.rawPublicKey, m.id);
+              m.isRead = true;
+            }
+          }
         },
         child: CircleAvatar(
           radius: 20,
