@@ -19,7 +19,7 @@ type Packet struct {
 
 var clients = make(map[string]*websocket.Conn)
 
-// --- ADDED: Store-and-forward queue for offline packets ---
+// --- Store-and-forward queue for offline packets ---
 var offlineQueue = make(map[string][]Packet)
 
 var mutex = &sync.Mutex{}
@@ -34,6 +34,29 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
     var userIdentity string
 
+    // Helper to broadcast status changes to everyone else
+    broadcastStatus := func(user string, online bool) {
+        statusPayload := "offline"
+        if online {
+            statusPayload = "online"
+        }
+        updatePacket := Packet{
+            Type:     "status_update",
+            FromUser: user,
+            ToUser:   "",
+            Payload:  statusPayload,
+        }
+        packetBytes, _ := json.Marshal(updatePacket)
+
+        mutex.Lock()
+        for k, conn := range clients {
+            if k != user { // Don't send it back to themselves
+                conn.WriteMessage(websocket.TextMessage, packetBytes)
+            }
+        }
+        mutex.Unlock()
+    }
+
     for {
         _, message, err := ws.ReadMessage()
         if err != nil {
@@ -41,7 +64,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
                 mutex.Lock()
                 delete(clients, userIdentity)
                 mutex.Unlock()
-                // Use a safe substring check in case the string is unexpectedly short
+                
+                // --- BROADCAST OFFLINE STATUS ---
+                broadcastStatus(userIdentity, false)
+
                 displayLen := 15
                 if len(userIdentity) < displayLen {
                     displayLen = len(userIdentity)
@@ -58,25 +84,44 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
         switch p.Type {
         case "register":
-            userIdentity = strings.TrimSpace(p.FromUser) // clean registration key
+            userIdentity = strings.TrimSpace(p.FromUser)
             
             mutex.Lock()
             clients[userIdentity] = ws
             
-            // --- FLOATING PACKET FLUSH ---
-            // Check if there are any cached messages waiting for this newly registered user
+            // Collect currently online public keys to send to the newcomer
+            onlineUsers := []string{}
+            for k := range clients {
+                if k != userIdentity {
+                    onlineUsers = append(onlineUsers, k)
+                }
+            }
+            
+            // Flush offline messages if any exist
             pendingPackets, hashPending := offlineQueue[userIdentity]
             if hashPending {
-                fmt.Printf("Flushing %d cached offline messages for: [%s...]\n", len(pendingPackets), userIdentity[:15])
                 for _, queuedPacket := range pendingPackets {
                     packetBytes, _ := json.Marshal(queuedPacket)
                     ws.WriteMessage(websocket.TextMessage, packetBytes)
                 }
-                // Clear the cache for this user now that they are safely delivered
                 delete(offlineQueue, userIdentity)
             }
             mutex.Unlock()
             
+            // --- Send initial list of online users to the newcomer ---
+            onlineListBytes, _ := json.Marshal(onlineUsers)
+            initialStatusPacket := Packet{
+                Type:     "status_update",
+                FromUser: "server",
+                ToUser:   userIdentity,
+                Payload:  string(onlineListBytes),
+            }
+            initialBytes, _ := json.Marshal(initialStatusPacket)
+            ws.WriteMessage(websocket.TextMessage, initialBytes)
+
+            // --- Broadcast to everyone else that this user is now online ---
+            broadcastStatus(userIdentity, true)
+
             displayLen := 25
             if len(userIdentity) < displayLen {
                 displayLen = len(userIdentity)
@@ -84,21 +129,17 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
             fmt.Printf("Registered Connection Pipeline for Public Key: [%s...]\n", userIdentity[:displayLen])
 
         case "message":
-            targetUser := strings.TrimSpace(p.ToUser) // clean routing key
+            targetUser := strings.TrimSpace(p.ToUser)
             mutex.Lock()
             recipientConn, found := clients[targetUser]
 
             if found {
-                // Target client is online; route it instantly
                 mutex.Unlock()
                 packetBytes, _ := json.Marshal(p)
                 recipientConn.WriteMessage(websocket.TextMessage, packetBytes)
-                fmt.Printf("Routed pure p2p packet directly to: [%s...]\n", targetUser[:15])
             } else {
-                // Target client is offline; catch it in our floating cache array
                 offlineQueue[targetUser] = append(offlineQueue[targetUser], p)
                 mutex.Unlock()
-                fmt.Printf("Target node [%s...] is offline. Saved packet to storage queue.\n", targetUser[:15])
             }
         }
     }

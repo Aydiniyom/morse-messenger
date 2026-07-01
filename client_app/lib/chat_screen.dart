@@ -39,6 +39,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   bool _isMobileSidebarExpanded = false;
   bool _isMessageEmpty = true;
 
+  final Set<String> _onlinePeers = {};
+
   @override
   void initState() {
     super.initState();
@@ -179,7 +181,27 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       final data = jsonDecode(rawData);
       final String senderPublicKey = data['fromUser'].toString().trim();
       final String rawPayload = data['payload'].toString();
+      final String packetType = data['type'] ?? '';
 
+      // --- HANDLE STATUS UPDATES ---
+      if (packetType == 'status_update') {
+        setState(() {
+          if (senderPublicKey == 'server') {
+            // The initial bulk list sent during registration
+            final List<dynamic> currentOnlineList = jsonDecode(data['payload']);
+            _onlinePeers.addAll(currentOnlineList.map((e) => e.toString().trim()));
+          } else {
+            // A dynamic single peer status change alert
+            final String status = data['payload'];
+            if (status == 'online') {
+              _onlinePeers.add(senderPublicKey);
+            } else {
+              _onlinePeers.remove(senderPublicKey);
+            }
+          }
+        });
+        return; // Stop processing further (it's not a chat message)
+      }
       // 1. Try decrypting the payload directly with RSA first.
       // If it's a read receipt or an old format message, this will succeed.
       String decryptedPayloadString;
@@ -815,15 +837,36 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   Widget _buildPeerListTile(ChatPeer p) {
+    final bool isOnline = _onlinePeers.contains(p.rawPublicKey.trim());
+
     return ListTile(
       selected: _selectedPeer == p,
       selectedTileColor: Colors.white10,
-      leading: CircleAvatar(
-        backgroundColor: Colors.tealAccent.withValues(alpha: 0.1),
-        child: Text(
-          p.nickname[0].toUpperCase(),
-          style: const TextStyle(color: Colors.tealAccent),
-        ),
+      leading: Stack(
+        children: [
+          CircleAvatar(
+            backgroundColor: _selectedPeer == p
+                ? Colors.tealAccent
+                : Colors.white10,
+            child: Text(
+              p.nickname[0].toUpperCase(),
+              style: TextStyle(color: _selectedPeer == p ? Colors.black : Colors.tealAccent,),
+            ),
+          ),
+          Positioned(
+            right: 0,
+            bottom: 0,
+            child: Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: isOnline ? Colors.greenAccent : Colors.blueGrey,
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+              ),
+            ),
+          ),
+        ],
       ),
       title: Text(p.nickname),
       onTap: () => _selectAndLoadPeer(p),
@@ -901,22 +944,41 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   Widget _buildMobileAvatarButton(ChatPeer p) {
+    final bool isOnline = _onlinePeers.contains(p.rawPublicKey.trim());
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: GestureDetector(
         onTap: () => _selectAndLoadPeer(p),
-        child: CircleAvatar(
-          radius: 20,
-          backgroundColor: _selectedPeer == p
-              ? Colors.tealAccent
-              : Colors.white10,
-          child: Text(
-            p.nickname[0].toUpperCase(),
-            style: TextStyle(
-              color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            CircleAvatar(
+            radius: 20,
+            backgroundColor: _selectedPeer == p
+                ? Colors.tealAccent
+                : Colors.white10,
+            child: Text(
+              p.nickname[0].toUpperCase(),
+              style: TextStyle(
+                color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
+              ),
             ),
           ),
-        ),
+          Positioned(
+            right: 14,
+            bottom: 2,
+            child: Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: isOnline ? Colors.greenAccent : Colors.blueGrey,
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+              ),
+            ),
+          ),
+        ],)
       ),
     );
   }
