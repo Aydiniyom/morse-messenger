@@ -1080,6 +1080,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                           decoration: TextDecoration.underline,
                         ),
                         listBullet: const TextStyle(color: Colors.tealAccent),
+                        blockquoteDecoration: BoxDecoration(
+                          color: Colors.teal,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        
                       ),
                 ),
               ),
