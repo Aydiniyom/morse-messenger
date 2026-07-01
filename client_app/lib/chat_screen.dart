@@ -327,6 +327,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         const Divider(color: Colors.white10, height: 1),
         Expanded(
           child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 10.0),
             children: _peers.map((p) => _buildPeerListTile(p)).toList(),
           ),
         ),
@@ -418,7 +419,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             const Divider(color: Colors.white10, height: 1),
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 8.0),
+                padding: const EdgeInsets.symmetric(vertical: 10.0),
                 children: _peers.map((p) => _buildMobileAvatarButton(p)).toList(),
               ),
             ),
