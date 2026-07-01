@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -160,30 +162,42 @@ class Dialogs {
             const SizedBox(height: 8),
             Row(
               mainAxisAlignment: MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
                 Expanded(
                   child: TextField(
                     controller: keyInputController,
                     decoration: const InputDecoration(
                       hintText: "Identity key...",
+                      // Implicitly uses your global 12px rounded theme
                     ),
                   ),
                 ),
-                OutlinedButton.icon(
-                  onPressed: () async {
-                    ClipboardData? data = await Clipboard.getData(
-                      Clipboard.kTextPlain,
-                    );
-
-                    if (data != null && data.text != null) {
-                      keyInputController.text = data.text!;
-                    }
-                  },
-                  label: const Text("Paste"),
-                  icon: const Icon(Icons.paste, size: 16),
+                const SizedBox(width: 8),
+                SizedBox(
+                  height: 48,
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.tealAccent,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      side: const BorderSide(color: Colors.white10),
+                      backgroundColor: const Color(0xFF1A1A1A),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                    ),
+                    onPressed: () async {
+                      final data = await Clipboard.getData(Clipboard.kTextPlain);
+                      if (data != null && data.text != null) {
+                        keyInputController.text = data.text!;
+                      }
+                    },
+                    label: const Text("Paste"),
+                    icon: const Icon(Icons.paste, size: 16),
+                  ),
                 ),
               ],
-            ),
+            )
           ],
         ),
         actions: [
