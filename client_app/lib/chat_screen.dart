@@ -353,6 +353,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               decoration: const InputDecoration(
                 hintText: "e.g. localhost:8080",
                 labelText: "Server IP / Host address",
+                labelStyle: TextStyle(
+                  color: Colors.white70,
+                )
               ),
             ),
           ],
@@ -393,7 +396,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             child: ListTile(
               title: const Text(
                 'Morse Messenger',
-                style: TextStyle(fontWeight: FontWeight.bold),
+                style: TextStyle(fontWeight: FontWeight.w400, fontFamily: "monospace"),
               ),
               trailing: IconButton(
                 icon: const Icon(
