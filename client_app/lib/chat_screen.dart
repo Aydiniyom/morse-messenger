@@ -412,7 +412,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                             Padding(
                               padding: const EdgeInsets.all(24.0),
                               child: Row(children: [
-                                Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
+                                Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)), onSubmitted: (_) => _sendMessage(),)),
                                 const SizedBox(width: 12),
                                 FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.send_rounded, color: Colors.black)),
                               ]),
