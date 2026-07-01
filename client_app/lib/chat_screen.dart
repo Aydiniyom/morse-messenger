@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:client_app/notification_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -189,7 +190,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           if (senderPublicKey == 'server') {
             // The initial bulk list sent during registration
             final List<dynamic> currentOnlineList = jsonDecode(data['payload']);
-            _onlinePeers.addAll(currentOnlineList.map((e) => e.toString().trim()));
+            _onlinePeers.addAll(
+              currentOnlineList.map((e) => e.toString().trim()),
+            );
           } else {
             // A dynamic single peer status change alert
             final String status = data['payload'];
@@ -312,6 +315,12 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         }
         if (_selectedPeer == sender) {
           _sendReadReceipt(senderPublicKey, msgId);
+        } else {
+          NotificationService.showNotification(
+            id: DateTime.now().millisecondsSinceEpoch ~/ 1000, // Safe unique ID
+            title: "New Message from ${sender.nickname}",
+            body: messageText,
+          );
         }
       });
       _scrollToBottom();
@@ -850,7 +859,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 : Colors.white10,
             child: Text(
               p.nickname[0].toUpperCase(),
-              style: TextStyle(color: _selectedPeer == p ? Colors.black : Colors.tealAccent,),
+              style: TextStyle(
+                color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
+              ),
             ),
           ),
           Positioned(
@@ -954,31 +965,32 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           alignment: Alignment.center,
           children: [
             CircleAvatar(
-            radius: 20,
-            backgroundColor: _selectedPeer == p
-                ? Colors.tealAccent
-                : Colors.white10,
-            child: Text(
-              p.nickname[0].toUpperCase(),
-              style: TextStyle(
-                color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
+              radius: 20,
+              backgroundColor: _selectedPeer == p
+                  ? Colors.tealAccent
+                  : Colors.white10,
+              child: Text(
+                p.nickname[0].toUpperCase(),
+                style: TextStyle(
+                  color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
+                ),
               ),
             ),
-          ),
-          Positioned(
-            right: 14,
-            bottom: 2,
-            child: Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                color: isOnline ? Colors.greenAccent : Colors.blueGrey,
-                shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+            Positioned(
+              right: 14,
+              bottom: 2,
+              child: Container(
+                width: 12,
+                height: 12,
+                decoration: BoxDecoration(
+                  color: isOnline ? Colors.greenAccent : Colors.blueGrey,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+                ),
               ),
             ),
-          ),
-        ],)
+          ],
+        ),
       ),
     );
   }
