@@ -351,6 +351,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           _scrollToBottom();
         },
       );
+      NotificationService.showNotification(
+        id: DateTime.now().millisecondsSinceEpoch ~/ 1000, // Safe unique ID
+        title: "Message Request from Unknown Peer",
+        body: "From Short-ID: ${senderPublicKey.substring(senderPublicKey.length - 15)}",
+      );
     }
   }
 
