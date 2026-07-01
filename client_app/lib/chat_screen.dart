@@ -951,64 +951,80 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
     return Align(
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Column(
-        crossAxisAlignment: m.isMe
-            ? CrossAxisAlignment.end
-            : CrossAxisAlignment.start,
-        children: [
-          GestureDetector(
-            onTapDown: (details) => tapDetails = details,
-            onSecondaryTapDown: (details) {
-              tapDetails = details;
-              _showDynamicContextMenu(context, tapDetails!, m);
-            },
-            onLongPress: () {
-              if (tapDetails != null) {
+      child: TweenAnimationBuilder<double>(
+        // Unique key per message prevents the animation from re-triggering when you scroll
+        key: ValueKey(m.id), 
+        tween: Tween<double>(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 800),
+        curve: Curves.easeOutCubic,
+        builder: (context, value, child) {
+          return Opacity(
+            opacity: value,
+            child: Transform.translate(
+              offset: Offset(0, 20 * (1.0 - value)),
+              child: child,
+            ),
+          );
+        },
+        child: Column(
+          crossAxisAlignment: m.isMe
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
+          children: [
+            GestureDetector(
+              onTapDown: (details) => tapDetails = details,
+              onSecondaryTapDown: (details) {
+                tapDetails = details;
                 _showDynamicContextMenu(context, tapDetails!, m);
-              }
-            },
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: m.isMe
-                    ? const Color(0xFF0B0B0B)
-                    : const Color(0xFF1E1E1E),
-                borderRadius: BorderRadius.circular(12),
-                border: m.isMe
-                    ? Border.all(color: Colors.white10, width: 0.5)
-                    : null,
-              ),
-              child: MarkdownBody(
-                data: m.text,
-                selectable: false,
-                styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-                  p: const TextStyle(color: Colors.white, fontSize: 14),
-                  code: const TextStyle(
-                    backgroundColor: Colors.black26,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    color: Colors.tealAccent,
+              },
+              onLongPress: () {
+                if (tapDetails != null) {
+                  _showDynamicContextMenu(context, tapDetails!, m);
+                }
+              },
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: m.isMe
+                      ? const Color(0xFF0B0B0B)
+                      : const Color(0xFF1E1E1E),
+                  borderRadius: BorderRadius.circular(12),
+                  border: m.isMe
+                      ? Border.all(color: Colors.white10, width: 0.5)
+                      : null,
+                ),
+                child: MarkdownBody(
+                  data: m.text,
+                  selectable: false,
+                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                    p: const TextStyle(color: Colors.white, fontSize: 14),
+                    code: const TextStyle(
+                      backgroundColor: Colors.black26,
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: Colors.tealAccent,
+                    ),
+                    codeblockDecoration: BoxDecoration(
+                      color: Colors.black38,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.white10, width: 0.5),
+                    ),
+                    a: const TextStyle(color: Colors.tealAccent, decoration: TextDecoration.underline),
+                    listBullet: const TextStyle(color: Colors.tealAccent),
                   ),
-                  codeblockDecoration: BoxDecoration(
-                    color: Colors.black38,
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.white10, width: 0.5),
-                  ),
-                  a: const TextStyle(color: Colors.tealAccent, decoration: TextDecoration.underline),
-                  listBullet: const TextStyle(color: Colors.tealAccent),
                 ),
               ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            child: Text(
-              m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString,
-              style: const TextStyle(fontSize: 10, color: Colors.white30),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              child: Text(
+                m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString,
+                style: const TextStyle(fontSize: 10, color: Colors.white30),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
