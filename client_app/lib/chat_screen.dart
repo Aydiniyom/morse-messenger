@@ -15,6 +15,9 @@ class DecentralizedChat extends StatefulWidget {
 }
 
 class _DecentralizedChatState extends State<DecentralizedChat> {
+  bool _isConnecting = false;
+  bool _isServerConnected = false;
+
   final _msgController = TextEditingController();
   final _keyInputController = TextEditingController();
   final _nameController = TextEditingController();
@@ -57,26 +60,66 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     super.dispose();
   }
 
-  void _initializeWebSocket() {
-    _channel?.sink.close();
-    try {
-      _channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
-      _channel!.sink.add(
-        jsonEncode({
-          "type": "register",
-          "fromUser": _myRawPublicKey,
-          "toUser": "",
-          "payload": "",
-        }),
+  void _initializeWebSocket() async {
+  _channel?.sink.close();
+  
+  setState(() {
+    _isConnecting = true;
+  });
+
+  try {
+    final channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
+    _channel = channel;
+
+    await channel.ready;
+
+    setState(() {
+      _isServerConnected = true;
+      _isConnecting = false;
+    });
+
+    _channel!.sink.add(
+      jsonEncode({
+        "type": "register",
+        "fromUser": _myRawPublicKey,
+        "toUser": "",
+        "payload": "",
+      }),
+    );
+
+    _channel!.stream.listen(
+      (rawData) {
+        _handleIncomingPacket(rawData.toString());
+      },
+      onError: (err) {
+        debugPrint("WebSocket connection error: $err");
+        setState(() {
+          _isServerConnected = false;
+          _isConnecting = false;
+        });
+      },
+      onDone: () {
+        debugPrint("WebSocket channel closed by host.");
+        setState(() {
+          _isServerConnected = false;
+          _isConnecting = false;
+        });
+      },
+    );
+  } catch (e) {
+    debugPrint("Handshake failed completely: $e");
+    setState(() {
+      _isServerConnected = false;
+      _isConnecting = false;
+    });
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to connect to $_serverIp. Check address or server status.')),
       );
-      _channel!.stream.listen(
-        (rawData) => _handleIncomingPacket(rawData.toString()),
-        onError: (err) => debugPrint("WebSocket connection dropped: $err"),
-      );
-    } catch (e) {
-      debugPrint("WebSocket failed to establish: $e");
     }
   }
+}
 
   void _loadOrCreateIdentity() async {
     String? savedKeyPem = await StorageService.readPrivateKey();
@@ -351,8 +394,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             TextField(
               controller: _ipController,
               decoration: const InputDecoration(
-                hintText: "e.g. localhost:8080",
-                labelText: "Server address",
+                hintText: "e.g. 192.168.1.50:8080",
+                labelText: "Server Address",
               ),
             ),
             const SizedBox(height: 12),
@@ -376,10 +419,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                   padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
                 icon: const Icon(Icons.refresh_rounded, size: 16),
-                label: const Text('Reset Identity', style: TextStyle(fontSize: 13)),
+                label: const Text(
+                  'Reset Identity',
+                  style: TextStyle(fontSize: 13),
+                ),
                 onPressed: () {
                   Navigator.pop(ctx);
-                  
+
                   showDialog(
                     context: context,
                     builder: (confirmCtx) => AlertDialog(
@@ -394,12 +440,17 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                           child: const Text('Cancel'),
                         ),
                         ElevatedButton(
-                          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.redAccent,
+                          ),
                           onPressed: () {
                             Navigator.pop(confirmCtx);
                             _resetIdentity();
                           },
-                          child: const Text('Wipe & Re-key', style: TextStyle(color: Colors.white)),
+                          child: const Text(
+                            'Wipe & Re-key',
+                            style: TextStyle(color: Colors.white),
+                          ),
                         ),
                       ],
                     ),
@@ -437,29 +488,96 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _resetIdentity() async {
-    // 1. Generate a brand new random RSA Keypair
     final kp = RSAKeypair.fromRandom();
-    
-    // 2. Overwrite the old PEM string in your persistent storage service
     await StorageService.savePrivateKey(kp.privateKey.toString());
 
-    // 3. Update state variables and wipe current peers to prevent mismatch encryption
     setState(() {
       _privKey = kp.privateKey;
       _myRawPublicKey = kp.publicKey.toString().trim();
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
       _peers.clear();
       _selectedPeer = null;
+      _isServerConnected = false;
     });
 
-    // 4. Force a fresh WebSocket registration pipe with the new key footprint
     _initializeWebSocket();
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Identity cleared. New secure key pairs deployed.')),
+        const SnackBar(
+          content: Text('Identity cleared. New secure key pairs deployed.'),
+        ),
       );
     }
+  }
+
+  void _connectToTargetServer() {
+    if (_ipController.text.isNotEmpty) {
+      setState(() {
+        _serverIp = _ipController.text.trim();
+      });
+      _initializeWebSocket();
+    }
+  }
+
+  Widget _buildConnectionSetupScreen() {
+    return Scaffold(
+      body: Center(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 400),
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Icon(Icons.waving_hand_rounded, size: 64, color: Colors.tealAccent),
+              const SizedBox(height: 24),
+              const Text(
+                'Welcome to Morse Messenger!',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Enter the address of a relay server to start chatting privately and anonymously.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white30, fontSize: 13),
+              ),
+              const SizedBox(height: 32),
+              TextField(
+                controller: _ipController,
+                decoration: const InputDecoration(
+                  hintText: "e.g. 192.168.1.50:8080",
+                  labelText: "Server Address",
+                  border: OutlineInputBorder(),
+                ),
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _connectToTargetServer(),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.tealAccent,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+                onPressed: _isConnecting ? null : _connectToTargetServer,
+                child: _isConnecting
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.black,
+                        ),
+                      )
+                    : const Text('Connect & Enter Morse'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildFullSidebarContent() {
@@ -471,7 +589,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             child: ListTile(
               title: const Text(
                 'Morse Messenger',
-                style: TextStyle(fontWeight: FontWeight.w400, fontFamily: "monospace"),
+                style: TextStyle(
+                  fontWeight: FontWeight.w400,
+                  fontFamily: "monospace",
+                ),
               ),
               trailing: IconButton(
                 icon: const Icon(
@@ -798,7 +919,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           ),
           const SizedBox(width: 12),
           FloatingActionButton(
-            backgroundColor: _isMessageEmpty ? Colors.white30 : Colors.tealAccent,
+            backgroundColor: _isMessageEmpty
+                ? Colors.white30
+                : Colors.tealAccent,
             onPressed: _isMessageEmpty ? null : _sendMessage,
             child: const Icon(Icons.send_rounded, color: Colors.black),
           ),
@@ -844,6 +967,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   Widget build(BuildContext context) {
     if (_myRawPublicKey.isEmpty) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    if (!_isServerConnected) {
+      return _buildConnectionSetupScreen();
     }
 
     return Scaffold(
