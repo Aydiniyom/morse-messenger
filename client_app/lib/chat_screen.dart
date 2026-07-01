@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:crypton/crypton.dart';
 import 'models.dart';
@@ -21,7 +22,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   final ScrollController _scrollController = ScrollController();
   bool _autoScroll = true;
 
-  // Track the server location dynamically
+  // track the server location dynamically
   String _serverIp = "localhost:8080";
   WebSocketChannel? _channel;
 
@@ -31,7 +32,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   final List<ChatPeer> _peers = [];
   ChatPeer? _selectedPeer;
 
-  // Track if the overlay sidebar is opened manually on small screens
   bool _isMobileSidebarExpanded = false;
 
   @override
@@ -158,6 +158,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               _selectedPeer ??= newPeer;
               _sendReadReceipt(senderPublicKey, acceptedMsgId);
             });
+            _scrollToBottom();
           },
         );
       }
@@ -244,6 +245,52 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         );
       });
     }
+  }
+
+  void _showDynamicContextMenu(BuildContext context, TapDownDetails details, ChatMessage message) {
+    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    
+    showMenu(
+      context: context,
+      position: RelativeRect.fromRect(
+        details.globalPosition & const Size(40, 40),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(
+          value: 'copy',
+          child: Row(
+            children: [
+              Icon(Icons.copy_rounded, size: 16, color: Colors.white70),
+              SizedBox(width: 10),
+              Text('Copy Message'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'delete',
+          child: Row(
+            children: [
+              Icon(Icons.delete_outline_rounded, size: 16, color: Colors.redAccent),
+              SizedBox(width: 10),
+              Text('Delete', style: TextStyle(color: Colors.redAccent)),
+            ],
+          ),
+        ),
+      ],
+      elevation: 8,
+    ).then((selectedValue) {
+      if (selectedValue == 'copy') {
+        Clipboard.setData(ClipboardData(text: message.text));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Message copied to clipboard'), duration: Duration(seconds: 1)),
+        );
+      } else if (selectedValue == 'delete') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Delete clicked (Placeholder active)')),
+        );
+      }
+    });
   }
 
   void _showSettingsDialog() {
@@ -336,33 +383,35 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         Expanded(
           child: ListView(
             children: _peers
-                .map(
-                  (p) => ListTile(
-                    selected: _selectedPeer == p,
-                    selectedTileColor: Colors.white10,
-                    leading: CircleAvatar(
-                      backgroundColor: Colors.tealAccent.withValues(alpha: 0.1),
-                      child: Text(
-                        p.nickname[0].toUpperCase(),
-                        style: const TextStyle(color: Colors.tealAccent),
-                      ),
+              .map(
+                (p) => ListTile(
+                  selected: _selectedPeer == p,
+                  selectedTileColor: Colors.white10,
+                  leading: CircleAvatar(
+                    backgroundColor: Colors.tealAccent.withValues(alpha: 0.1),
+                    child: Text(
+                      p.nickname[0].toUpperCase(),
+                      style: const TextStyle(color: Colors.tealAccent),
                     ),
-                    title: Text(p.nickname),
-                    onTap: () {
-                      setState(() {
-                        _selectedPeer = p;
-                        _isMobileSidebarExpanded = false;
-                      });
-                      for (var m in p.messages) {
-                        if (!m.isMe && !m.isRead) {
-                          _sendReadReceipt(p.rawPublicKey, m.id);
-                          m.isRead = true;
-                        }
-                      }
-                    },
                   ),
-                )
-                .toList(),
+                  title: Text(p.nickname),
+                  onTap: () {
+                    setState(() {
+                      _selectedPeer = p;
+                      _isMobileSidebarExpanded = false;
+                      _autoScroll = true;
+                    });
+                    _scrollToBottom();
+                    for (var m in p.messages) {
+                      if (!m.isMe && !m.isRead) {
+                        _sendReadReceipt(p.rawPublicKey, m.id);
+                        m.isRead = true;
+                      }
+                    }
+                  },
+                ),
+              )
+            .toList(),
           ),
         ),
         const Divider(color: Colors.white10, height: 1),
@@ -410,7 +459,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   @override
   Widget build(BuildContext context) {
     if (_myRawPublicKey.isEmpty)
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      {return const Scaffold(body: Center(child: CircularProgressIndicator()));}
 
     return Scaffold(
       body: LayoutBuilder(
@@ -462,8 +511,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                           vertical: 8.0,
                                         ),
                                         child: GestureDetector(
-                                          onTap: () =>
-                                              setState(() => _selectedPeer = p),
+                                          onTap: () {
+                                            setState(() {
+                                              _selectedPeer = p;
+                                              _autoScroll = true;
+                                            });
+                                            _scrollToBottom();
+                                          },
                                           child: CircleAvatar(
                                             radius: 20,
                                             backgroundColor: _selectedPeer == p
@@ -484,28 +538,36 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                     .toList(),
                               ),
                             ),
-                            const Divider(color: Colors.white10, height: 8),
-                            IconButton(
-                              icon: const Icon(
-                                Icons.settings,
-                                color: Colors.white30,
-                                size: 20,
+                            const Divider(color: Colors.white10, height: 1),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 12.0),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.settings,
+                                      color: Colors.white30,
+                                      size: 20,
+                                    ),
+                                    onPressed: _showSettingsDialog,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.vpn_key,
+                                      color: Colors.white30,
+                                      size: 20,
+                                    ),
+                                    onPressed: () => Dialogs.showIdentityModal(
+                                      context: context,
+                                      shortId: _myShortId,
+                                      rawPublicKey: _myRawPublicKey,
+                                    ),
+                                  ),
+                                ],
                               ),
-                              onPressed: _showSettingsDialog,
                             ),
-                            IconButton(
-                              icon: const Icon(
-                                Icons.vpn_key,
-                                color: Colors.white30,
-                                size: 20,
-                              ),
-                              onPressed: () => Dialogs.showIdentityModal(
-                                context: context,
-                                shortId: _myShortId,
-                                rawPublicKey: _myRawPublicKey,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
                           ],
                         ),
                       ),
@@ -547,18 +609,12 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                 ),
                                 const Divider(height: 1, color: Colors.white10),
                                 Expanded(
-                                  child: NotificationListener(
+                                  child: NotificationListener<ScrollNotification>(
                                     onNotification: (ScrollNotification scrollInfo) {
-                                      // Check if user is at or very close to the bottom edge (within 10 pixels)
-                                      final isAtBottom =
-                                          scrollInfo.metrics.pixels >=
-                                          (scrollInfo.metrics.maxScrollExtent -
-                                              10);
-
+                                      final isAtBottom = scrollInfo.metrics.pixels >= (scrollInfo.metrics.maxScrollExtent - 10);
                                       if (isAtBottom && !_autoScroll) {
                                         _autoScroll = true;
                                       } else if (!isAtBottom && _autoScroll) {
-                                        // User scrolled away up into history, disable stick-to-bottom behavior
                                         _autoScroll = false;
                                       }
                                       return true;
@@ -566,11 +622,12 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                     child: ListView(
                                       controller: _scrollController,
                                       padding: const EdgeInsets.all(24),
-                                      children: _selectedPeer!.messages.map((
-                                        m,
-                                      ) {
+                                      children: _selectedPeer!.messages.map((m) {
                                         final String timeString =
                                             "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
+                                        
+                                        TapDownDetails? tapDetails;
+
                                         return Align(
                                           alignment: m.isMe
                                               ? Alignment.centerRight
@@ -580,28 +637,37 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                                 ? CrossAxisAlignment.end
                                                 : CrossAxisAlignment.start,
                                             children: [
-                                              Container(
-                                                margin:
-                                                    const EdgeInsets.symmetric(
-                                                      vertical: 4,
-                                                    ),
-                                                padding: const EdgeInsets.all(
-                                                  12,
+                                              GestureDetector(
+                                                onTapDown: (details) => tapDetails = details,
+                                                onSecondaryTapDown: (details) {
+                                                  tapDetails = details;
+                                                  _showDynamicContextMenu(context, tapDetails!, m);
+                                                },
+                                                onLongPress: () {
+                                                  if (tapDetails != null) {
+                                                    _showDynamicContextMenu(context, tapDetails!, m);
+                                                  }
+                                                },
+                                                child: Container(
+                                                  margin: const EdgeInsets.symmetric(
+                                                    vertical: 4,
+                                                  ),
+                                                  padding: const EdgeInsets.all(12),
+                                                  decoration: BoxDecoration(
+                                                    color: m.isMe
+                                                        ? const Color(0xFF0B0B0B)
+                                                        : const Color(0xFF1E1E1E),
+                                                    borderRadius:
+                                                        BorderRadius.circular(12),
+                                                    border: m.isMe
+                                                        ? Border.all(
+                                                            color: Colors.white10,
+                                                            width: 0.5,
+                                                          )
+                                                        : null,
+                                                  ),
+                                                  child: Text(m.text),
                                                 ),
-                                                decoration: BoxDecoration(
-                                                  color: m.isMe
-                                                      ? const Color(0xFF0B0B0B)
-                                                      : const Color(0xFF1E1E1E),
-                                                  borderRadius:
-                                                      BorderRadius.circular(12),
-                                                  border: m.isMe
-                                                      ? Border.all(
-                                                          color: Colors.white10,
-                                                          width: 0.5,
-                                                        )
-                                                      : null,
-                                                ),
-                                                child: Text(m.text),
                                               ),
                                               Padding(
                                                 padding:
@@ -633,6 +699,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                       Expanded(
                                         child: TextField(
                                           controller: _msgController,
+                                          textInputAction: TextInputAction.send,
+                                          onSubmitted: (_) => _sendMessage(),
                                           decoration: const InputDecoration(
                                             hintText: 'Type your message...',
                                             filled: true,
@@ -644,7 +712,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                                               borderSide: BorderSide.none,
                                             ),
                                           ),
-                                          onSubmitted: (_) => _sendMessage(),
                                         ),
                                       ),
                                       const SizedBox(width: 12),
