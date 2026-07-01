@@ -136,10 +136,17 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       await StorageService.savePrivateKey(kp.privateKey.toString());
     }
 
+    // Load old peers list asynchronously out of Hive storage memory
+    final savedPeers = await StorageService.fetchPeerList();
+    final List<ChatPeer> hydratedPeers = savedPeers.map((data) {
+      return ChatPeer(data['publicKey']!, data['nickname']!);
+    }).toList();
+
     setState(() {
       _privKey = kp.privateKey;
       _myRawPublicKey = kp.publicKey.toString().trim();
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
+      _peers.addAll(hydratedPeers); // Restores your sidebar UI!
     });
 
     _initializeWebSocket();
@@ -149,7 +156,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     try {
       final data = jsonDecode(rawData);
       final String senderPublicKey = data['fromUser'].toString().trim();
-      final decryptedPayload = _privKey.decrypt(data['payload']);
+      final String rawCiphertext = data['payload'].toString();
+      final decryptedPayload = _privKey.decrypt(rawCiphertext);
       final Map<String, dynamic> payloadMap = jsonDecode(decryptedPayload);
 
       if (payloadMap['isReceipt'] == true) {
@@ -157,7 +165,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         return;
       }
 
-      _processIncomingMessage(senderPublicKey, payloadMap);
+      _processIncomingMessage(senderPublicKey, rawCiphertext, payloadMap);
     } catch (_) {}
   }
 
@@ -173,13 +181,24 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
   void _processIncomingMessage(
     String senderPublicKey,
+    String rawCiphertext,
     Map<String, dynamic> payloadMap,
-  ) {
+  ) async {
     final String messageText = payloadMap['text'];
     final String msgId = payloadMap['msgId'];
     final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
     bool peerExists = _peers.any(
       (p) => p.rawPublicKey.trim() == senderPublicKey,
+    );
+
+    // Save the unpacked clear text message string. Hive ensures it is written 
+    // securely encrypted with AES-256 to your physical disk.
+    await StorageService.persistEncryptedMessage(
+      peerPublicKey: senderPublicKey,
+      msgId: msgId,
+      encryptedPayload: messageText, // Save clear text to let Hive encrypt it uniformly
+      isMe: false,
+      timestampIso: sentTime.toIso8601String(),
     );
 
     if (peerExists) {
@@ -203,6 +222,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       });
       _scrollToBottom();
     } else {
+      if (!mounted) return;
       Dialogs.showUnknownPeerDialog(
         context: context,
         senderPublicKey: senderPublicKey,
@@ -224,6 +244,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             _selectedPeer ??= newPeer;
             _sendReadReceipt(senderPublicKey, acceptedMsgId);
           });
+          _syncPeersToStorage();
           _scrollToBottom();
         },
       );
@@ -261,12 +282,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     } else {
       setState(() => _peers.add(ChatPeer(key, nickname)));
       _selectedPeer ??= _peers.last;
+      _syncPeersToStorage();
     }
     _keyInputController.clear();
     _nameController.clear();
   }
 
-  void _sendMessage() {
+  void _sendMessage() async {
     if (_msgController.text.isEmpty ||
         _selectedPeer == null ||
         _channel == null) {
@@ -286,13 +308,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       "timestamp": newMsg.timestamp.toIso8601String(),
     });
 
+    // 1. Encrypt using the recipient's key ONLY for the network pipe transmission
+    final encryptedPayloadString = recipientPublicKeyObj.encrypt(messagePayload);
+
     _channel!.sink.add(
       jsonEncode({
         "type": "message",
         "fromUser": _myRawPublicKey,
         "toUser": _selectedPeer!.rawPublicKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(messagePayload),
+        "payload": encryptedPayloadString,
       }),
+    );
+
+    // 2. Persist our local copy safely inside the AES Hive file as a clean inner string.
+    // This removes the RSA decryption conflict since it doesn't store the peer's cipher.
+    await StorageService.persistEncryptedMessage(
+      peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
+      msgId: newMsg.id,
+      encryptedPayload: text, // Pass the clear text directly (Hive encrypts this on disk automatically)
+      isMe: true,
+      timestampIso: newMsg.timestamp.toIso8601String(),
     );
 
     setState(() {
@@ -630,6 +665,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     );
   }
 
+  void _syncPeersToStorage() async {
+    final serialized = _peers.map((p) => {
+      "nickname": p.nickname,
+      "publicKey": p.rawPublicKey
+    }).toList();
+    await StorageService.savePeerList(serialized);
+  }
+
   Widget _buildPeerListTile(ChatPeer p) {
     return ListTile(
       selected: _selectedPeer == p,
@@ -642,13 +685,33 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         ),
       ),
       title: Text(p.nickname),
-      onTap: () {
+      onTap: () async {
+        final records = await StorageService.fetchHistory(p.rawPublicKey);
+        
+        List<ChatMessage> loadedMessages = [];
+        for (var record in records) {
+          // The payload field now holds the clean message text directly out of the AES file
+          final String messageText = record['payload'] ?? '';
+          
+          loadedMessages.add(
+            ChatMessage(
+              messageText,
+              record['isMe'] == true,
+              customTime: DateTime.parse(record['timestamp']),
+              customId: record['id'],
+            )..isRead = record['isRead'] == true,
+          );
+        }
+
         setState(() {
+          p.messages = loadedMessages; 
           _selectedPeer = p;
           _isMobileSidebarExpanded = false;
           _autoScroll = true;
         });
+        
         _scrollToBottom();
+        
         for (var m in p.messages) {
           if (!m.isMe && !m.isRead) {
             _sendReadReceipt(p.rawPublicKey, m.id);
@@ -733,8 +796,35 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: GestureDetector(
-        onTap: () {
+        onTap: () async {
+          final records = await StorageService.fetchHistory(p.rawPublicKey);
+          List<ChatMessage> loadedMessages = [];
+          for (var record in records) {
+            try {
+              final decryptedPayload = _privKey.decrypt(record['payload']);
+              final Map<String, dynamic> payloadMap = jsonDecode(decryptedPayload);
+              loadedMessages.add(
+                ChatMessage(
+                  payloadMap['text'] ?? '',
+                  record['isMe'] == true,
+                  customTime: DateTime.parse(record['timestamp']),
+                  customId: record['id'],
+                )..isRead = record['isRead'] == true,
+              );
+            } catch (_) {
+              loadedMessages.add(
+                ChatMessage(
+                  "[Undecryptable payload]",
+                  record['isMe'] == true,
+                  customTime: DateTime.parse(record['timestamp']),
+                  customId: record['id'],
+                ),
+              );
+            }
+          }
+
           setState(() {
+            p.messages = loadedMessages;
             _selectedPeer = p;
             _autoScroll = true;
           });

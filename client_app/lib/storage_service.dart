@@ -5,47 +5,65 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class StorageService {
   static const _secureStorage = FlutterSecureStorage();
-  static const _boxName = 'secure_chat_box';
+  static const _boxName = 'secure_chat_box'; 
   static const _keyName = 'dec_chat_private_key';
   static const _hiveSecretKeyName = 'hive_aes_encryption_key';
+  static const _historyBoxName = 'chat_history';
+  
+  // Specific internal key name inside our configuration box for contacts
+  static const _peerListKey = 'saved_chat_peers_list';
 
-  // initializes Hive and opens the encrypted box safely
-  static Future<Box> _getEncryptedBox() async {
+  static Future<void> initDatabase() async {
     await Hive.initFlutter();
-    
-    List<int> encryptionKey;
-    try {
-      // try to read an existing AES encryption key from secure storage
-      final savedKeyString = await _secureStorage.read(key: _hiveSecretKeyName);
-      if (savedKeyString != null) {
-        encryptionKey = base64Url.decode(savedKeyString);
-      } else {
-        // generate a brand new 256-bit key if it doesn't exist yet
-        encryptionKey = Hive.generateSecureKey();
-        await _secureStorage.write(
-          key: _hiveSecretKeyName, 
-          value: base64Url.encode(encryptionKey),
-        );
-      }
-    } catch (e) {
-      debugPrint("OS Keyring locked. Using a deterministic fallback encryption key: $e");
-      // FALLBACK: create a stable 32-byte key so the app doesn't crash
-      encryptionKey = List<int>.generate(32, (i) => (i + 42) % 256);
-    }
-
-    // open the box using the AES-256 encryption cipher
-    return await Hive.openBox(
-      _boxName, 
-      encryptionCipher: HiveAesCipher(encryptionKey),
-    );
   }
 
+  static String _toBoxKey(String rawPublicKey) {
+    final cleaned = rawPublicKey.replaceAll(RegExp(r'\s+'), '');
+    if (cleaned.length <= 100) return cleaned;
+    return cleaned.substring(cleaned.length - 100);
+  }
+
+  static Future<List<int>> _getDatabaseKey() async {
+    try {
+      final savedKeyString = await _secureStorage.read(key: _hiveSecretKeyName);
+      if (savedKeyString != null) {
+        return base64Url.decode(savedKeyString);
+      } else {
+        final newKey = Hive.generateSecureKey();
+        await _secureStorage.write(
+          key: _hiveSecretKeyName, 
+          value: base64Url.encode(newKey),
+        );
+        return newKey;
+      }
+    } catch (e) {
+      debugPrint("OS Keyring locked. Using deterministic fallback key: $e");
+      return List<int>.generate(32, (i) => (i + 57) % 256);
+    }
+  }
+
+  static Future<Box> _getEncryptedBox() async {
+    final encryptionKey = await _getDatabaseKey();
+    try {
+      return await Hive.openBox(
+        _boxName, 
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
+    } catch (e) {
+      await Hive.deleteBoxFromDisk(_boxName);
+      return await Hive.openBox(
+        _boxName, 
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
+    }
+  }
+
+  // --- IDENTITY CONFIGURATION PERSISTENCE ---
   static Future<String?> readPrivateKey() async {
     try {
       final box = await _getEncryptedBox();
       return box.get(_keyName) as String?;
     } catch (e) {
-      debugPrint("Error reading from encrypted Hive box: $e");
       return null;
     }
   }
@@ -54,8 +72,84 @@ class StorageService {
     try {
       final box = await _getEncryptedBox();
       await box.put(_keyName, pemValue);
+    } catch (_) {}
+  }
+
+  // --- PEER PROFILE CONTACT INDEXES ---
+  static Future<void> savePeerList(List<Map<String, String>> serializedPeers) async {
+    try {
+      final box = await _getEncryptedBox();
+      await box.put(_peerListKey, jsonEncode(serializedPeers));
     } catch (e) {
-      debugPrint("Error writing to encrypted Hive box: $e");
+      debugPrint("Failed to write contact indexes: $e");
+    }
+  }
+
+  static Future<List<Map<String, String>>> fetchPeerList() async {
+    try {
+      final box = await _getEncryptedBox();
+      final String? rawJson = box.get(_peerListKey) as String?;
+      if (rawJson == null) return [];
+      
+      final List<dynamic> decodedList = jsonDecode(rawJson);
+      return List<Map<String, String>>.from(
+        decodedList.map((item) => Map<String, String>.from(item as Map))
+      );
+    } catch (e) {
+      debugPrint("Failed to read contact indexes: $e");
+      return [];
+    }
+  }
+
+  // --- SECURE CHAT HISTORY PERSISTENCE LAYER ---
+  static Future<void> persistEncryptedMessage({
+    required String peerPublicKey,
+    required String msgId,
+    required String encryptedPayload,
+    required bool isMe,
+    required String timestampIso,
+  }) async {
+    try {
+      final key = await _getDatabaseKey();
+      final box = await Hive.openBox(_historyBoxName, encryptionCipher: HiveAesCipher(key));
+      final hiveSafeKey = _toBoxKey(peerPublicKey);
+      
+      final String rawJsonString = box.get(hiveSafeKey, defaultValue: "[]");
+      final List<dynamic> decodedList = jsonDecode(rawJsonString);
+      
+      List<Map<String, dynamic>> messageHistory = List<Map<String, dynamic>>.from(
+        decodedList.map((item) => Map<String, dynamic>.from(item as Map))
+      );
+
+      messageHistory.add({
+        "id": msgId,
+        "isMe": isMe,
+        "payload": encryptedPayload, 
+        "timestamp": timestampIso,
+        "isRead": isMe ? true : false,
+      });
+
+      await box.put(hiveSafeKey, jsonEncode(messageHistory));
+    } catch (e) {
+      debugPrint("Database message append failure: $e");
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> fetchHistory(String peerPublicKey) async {
+    try {
+      final key = await _getDatabaseKey();
+      final box = await Hive.openBox(_historyBoxName, encryptionCipher: HiveAesCipher(key));
+      final hiveSafeKey = _toBoxKey(peerPublicKey);
+      
+      final String rawJsonString = box.get(hiveSafeKey, defaultValue: "[]");
+      final List<dynamic> decodedList = jsonDecode(rawJsonString);
+      
+      return List<Map<String, dynamic>>.from(
+        decodedList.map((item) => Map<String, dynamic>.from(item as Map))
+      );
+    } catch (e) {
+      debugPrint("Database historical read failure: $e");
+      return [];
     }
   }
 }

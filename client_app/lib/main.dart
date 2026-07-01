@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
 import 'chat_screen.dart';
+import 'storage_service.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // ensure background folder paths are initialized before UI rendering
+  await StorageService.initDatabase();
+
   runApp(const MyApp());
 }
 
@@ -21,7 +26,7 @@ class MyApp extends StatelessWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: darkBackground,
-        
+
         colorScheme: ColorScheme.dark(
           primary: teal,
           onPrimary: Colors.black,
