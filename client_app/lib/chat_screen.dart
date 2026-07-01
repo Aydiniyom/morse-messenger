@@ -7,6 +7,7 @@ import 'models.dart';
 import 'dialogs.dart';
 import 'storage_service.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:encrypt/encrypt.dart' as enc;
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -157,17 +158,55 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     try {
       final data = jsonDecode(rawData);
       final String senderPublicKey = data['fromUser'].toString().trim();
-      final String rawCiphertext = data['payload'].toString();
-      final decryptedPayload = _privKey.decrypt(rawCiphertext);
-      final Map<String, dynamic> payloadMap = jsonDecode(decryptedPayload);
+      final String rawPayload = data['payload'].toString();
 
-      if (payloadMap['isReceipt'] == true) {
-        _processReadReceipt(senderPublicKey, payloadMap['msgId']);
+      // 1. Try decrypting the payload directly with RSA first.
+      // If it's a read receipt or an old format message, this will succeed.
+      String decryptedPayloadString;
+      Map<String, dynamic>? parsedPayloadMap;
+      bool isHybridPacket = false;
+
+      try {
+        decryptedPayloadString = _privKey.decrypt(rawPayload);
+        parsedPayloadMap = jsonDecode(decryptedPayloadString);
+      } catch (_) {
+        // If pure RSA decryption fails, it means the payload is a hybrid JSON bundle structure!
+        isHybridPacket = true;
+      }
+
+      // 2. Handle standard Hybrid packet processing if flag is set
+      if (isHybridPacket) {
+        final Map<String, dynamic> hybridBundle = jsonDecode(rawPayload);
+        final String rsaEncryptedKeyBundle = hybridBundle['encryptedAesKey'];
+        final String base64Ciphertext = hybridBundle['ciphertext'];
+
+        // Decrypt the AES key bundle via RSA
+        final decryptedKeyBundleString = _privKey.decrypt(rsaEncryptedKeyBundle);
+        final Map<String, dynamic> keyBundleMap = jsonDecode(decryptedKeyBundleString);
+        
+        final aesKey = enc.Key.fromBase64(keyBundleMap['key']);
+        final iv = enc.IV.fromBase64(keyBundleMap['iv']);
+
+        // Decrypt the actual message text via AES
+        final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.cbc));
+        final decryptedMessageTextPayload = encrypter.decrypt64(base64Ciphertext, iv: iv);
+        
+        parsedPayloadMap = jsonDecode(decryptedMessageTextPayload);
+      }
+
+      if (parsedPayloadMap == null) return;
+
+      // 3. Routinely split execution between receipts and regular text payloads
+      if (parsedPayloadMap['isReceipt'] == true) {
+        _processReadReceipt(senderPublicKey, parsedPayloadMap['msgId']);
         return;
       }
 
-      _processIncomingMessage(senderPublicKey, rawCiphertext, payloadMap);
-    } catch (_) {}
+      // Send the clean, unpacked message text string down to persistence
+      _processIncomingMessage(senderPublicKey, parsedPayloadMap['text'] ?? '', parsedPayloadMap);
+    } catch (e) {
+      debugPrint("Hybrid decryption failed payload processing execution: $e");
+    }
   }
 
   void _processReadReceipt(String senderPublicKey, String targetMsgId) {
@@ -192,12 +231,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       (p) => p.rawPublicKey.trim() == senderPublicKey,
     );
 
-    // Save the unpacked clear text message string. Hive ensures it is written 
+    // Save the unpacked clear text message string. Hive ensures it is written
     // securely encrypted with AES-256 to your physical disk.
     await StorageService.persistEncryptedMessage(
       peerPublicKey: senderPublicKey,
       msgId: msgId,
-      encryptedPayload: messageText, // Save clear text to let Hive encrypt it uniformly
+      encryptedPayload:
+          messageText, // Save clear text to let Hive encrypt it uniformly
       isMe: false,
       timestampIso: sentTime.toIso8601String(),
     );
@@ -302,31 +342,54 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       _selectedPeer!.rawPublicKey.trim(),
     );
 
-    final messagePayload = jsonEncode({
+    // 1. Prepare our clean cleartext message structural wrapper
+    final innerMessagePayload = jsonEncode({
       "isReceipt": false,
       "text": text,
       "msgId": newMsg.id,
       "timestamp": newMsg.timestamp.toIso8601String(),
     });
 
-    // 1. Encrypt using the recipient's key ONLY for the network pipe transmission
-    final encryptedPayloadString = recipientPublicKeyObj.encrypt(messagePayload);
+    // 2. HYBRID LAYER: Generate an ephemeral 256-bit AES key and a secure IV
+    final ephemeralAesKey = enc.Key.fromSecureRandom(32);
+    final iv = enc.IV.fromSecureRandom(16);
+    final encrypter = enc.Encrypter(
+      enc.AES(ephemeralAesKey, mode: enc.AESMode.cbc),
+    );
+
+    // 3. Encrypt the unlimited length message string using AES
+    final encryptedCiphertext = encrypter.encrypt(innerMessagePayload, iv: iv);
+
+    // 4. Encrypt the tiny 32-byte AES key using the target's asymmetric RSA Public Key
+    // We combine the raw key bytes and IV bytes so everything travels together securely.
+    final keyBundleToEncrypt = jsonEncode({
+      "key": ephemeralAesKey.base64,
+      "iv": iv.base64,
+    });
+    final rsaEncryptedKeyBundle = recipientPublicKeyObj.encrypt(
+      keyBundleToEncrypt,
+    );
+
+    // 5. Package the hybrid payload bundle for the network pipe
+    final structuralNetworkPacket = jsonEncode({
+      "encryptedAesKey": rsaEncryptedKeyBundle,
+      "ciphertext": encryptedCiphertext.base64,
+    });
 
     _channel!.sink.add(
       jsonEncode({
         "type": "message",
         "fromUser": _myRawPublicKey,
         "toUser": _selectedPeer!.rawPublicKey.trim(),
-        "payload": encryptedPayloadString,
+        "payload": structuralNetworkPacket, // Send the hybrid bundle
       }),
     );
 
-    // 2. Persist our local copy safely inside the AES Hive file as a clean inner string.
-    // This removes the RSA decryption conflict since it doesn't store the peer's cipher.
+    // 6. Persist local copy securely inside our AES Hive file
     await StorageService.persistEncryptedMessage(
       peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
       msgId: newMsg.id,
-      encryptedPayload: text, // Pass the clear text directly (Hive encrypts this on disk automatically)
+      encryptedPayload: text,
       isMe: true,
       timestampIso: newMsg.timestamp.toIso8601String(),
     );
@@ -667,10 +730,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _syncPeersToStorage() async {
-    final serialized = _peers.map((p) => {
-      "nickname": p.nickname,
-      "publicKey": p.rawPublicKey
-    }).toList();
+    final serialized = _peers
+        .map((p) => {"nickname": p.nickname, "publicKey": p.rawPublicKey})
+        .toList();
     await StorageService.savePeerList(serialized);
   }
 
@@ -688,12 +750,12 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       title: Text(p.nickname),
       onTap: () async {
         final records = await StorageService.fetchHistory(p.rawPublicKey);
-        
+
         List<ChatMessage> loadedMessages = [];
         for (var record in records) {
           // The payload field now holds the clean message text directly out of the AES file
           final String messageText = record['payload'] ?? '';
-          
+
           loadedMessages.add(
             ChatMessage(
               messageText,
@@ -705,14 +767,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         }
 
         setState(() {
-          p.messages = loadedMessages; 
+          p.messages = loadedMessages;
           _selectedPeer = p;
           _isMobileSidebarExpanded = false;
           _autoScroll = true;
         });
-        
+
         _scrollToBottom();
-        
+
         for (var m in p.messages) {
           if (!m.isMe && !m.isRead) {
             _sendReadReceipt(p.rawPublicKey, m.id);
@@ -803,7 +865,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           for (var record in records) {
             try {
               final decryptedPayload = _privKey.decrypt(record['payload']);
-              final Map<String, dynamic> payloadMap = jsonDecode(decryptedPayload);
+              final Map<String, dynamic> payloadMap = jsonDecode(
+                decryptedPayload,
+              );
               loadedMessages.add(
                 ChatMessage(
                   payloadMap['text'] ?? '',
@@ -953,7 +1017,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: TweenAnimationBuilder<double>(
         // Unique key per message prevents the animation from re-triggering when you scroll
-        key: ValueKey(m.id), 
+        key: ValueKey(m.id),
         tween: Tween<double>(begin: 0.0, end: 1.0),
         duration: const Duration(milliseconds: 800),
         curve: Curves.easeOutCubic,
@@ -997,22 +1061,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 child: MarkdownBody(
                   data: m.text,
                   selectable: false,
-                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-                    p: const TextStyle(color: Colors.white, fontSize: 14),
-                    code: const TextStyle(
-                      backgroundColor: Colors.black26,
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                      color: Colors.tealAccent,
-                    ),
-                    codeblockDecoration: BoxDecoration(
-                      color: Colors.black38,
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: Colors.white10, width: 0.5),
-                    ),
-                    a: const TextStyle(color: Colors.tealAccent, decoration: TextDecoration.underline),
-                    listBullet: const TextStyle(color: Colors.tealAccent),
-                  ),
+                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                      .copyWith(
+                        p: const TextStyle(color: Colors.white, fontSize: 14),
+                        code: const TextStyle(
+                          backgroundColor: Colors.black26,
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: Colors.tealAccent,
+                        ),
+                        codeblockDecoration: BoxDecoration(
+                          color: Colors.black38,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.white10, width: 0.5),
+                        ),
+                        a: const TextStyle(
+                          color: Colors.tealAccent,
+                          decoration: TextDecoration.underline,
+                        ),
+                        listBullet: const TextStyle(color: Colors.tealAccent),
+                      ),
                 ),
               ),
             ),
