@@ -432,6 +432,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     }
   }
 
+  void _jumpToBottom() {
+    if (_scrollController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      });
+    }
+  }
+
   void _showDynamicContextMenu(
     BuildContext context,
     TapDownDetails details,
@@ -753,6 +761,44 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     await StorageService.savePeerList(serialized);
   }
 
+  Future<void> _selectAndLoadPeer(ChatPeer p) async {
+    // 1. Fetch historical database records uniformly
+    final records = await StorageService.fetchHistory(p.rawPublicKey);
+
+    List<ChatMessage> loadedMessages = [];
+    for (var record in records) {
+      final String messageText = record['payload'] ?? '';
+
+      loadedMessages.add(
+        ChatMessage(
+          messageText,
+          record['isMe'] == true,
+          customTime: DateTime.parse(record['timestamp']),
+          customId: record['id'],
+        )..isRead = record['isRead'] == true,
+      );
+    }
+
+    // 2. Set the state variables for the entire UI
+    setState(() {
+      p.messages = loadedMessages;
+      _selectedPeer = p;
+      _isMobileSidebarExpanded = false; // Automatically closes the drawer if it was open on mobile
+      _autoScroll = true;
+    });
+
+    // 3. Trigger the instant jump to the bottom of the stream
+    _jumpToBottom();
+
+    // 4. Send read receipts for incoming unread messages now that they are viewed
+    for (var m in p.messages) {
+      if (!m.isMe && !m.isRead) {
+        _sendReadReceipt(p.rawPublicKey, m.id);
+        m.isRead = true;
+      }
+    }
+  }
+
   Widget _buildPeerListTile(ChatPeer p) {
     return ListTile(
       selected: _selectedPeer == p,
@@ -765,40 +811,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         ),
       ),
       title: Text(p.nickname),
-      onTap: () async {
-        final records = await StorageService.fetchHistory(p.rawPublicKey);
-
-        List<ChatMessage> loadedMessages = [];
-        for (var record in records) {
-          // The payload field now holds the clean message text directly out of the AES file
-          final String messageText = record['payload'] ?? '';
-
-          loadedMessages.add(
-            ChatMessage(
-              messageText,
-              record['isMe'] == true,
-              customTime: DateTime.parse(record['timestamp']),
-              customId: record['id'],
-            )..isRead = record['isRead'] == true,
-          );
-        }
-
-        setState(() {
-          p.messages = loadedMessages;
-          _selectedPeer = p;
-          _isMobileSidebarExpanded = false;
-          _autoScroll = true;
-        });
-
-        _scrollToBottom();
-
-        for (var m in p.messages) {
-          if (!m.isMe && !m.isRead) {
-            _sendReadReceipt(p.rawPublicKey, m.id);
-            m.isRead = true;
-          }
-        }
-      },
+      onTap: () => _selectAndLoadPeer(p),
     );
   }
 
@@ -876,41 +889,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: GestureDetector(
-        onTap: () async {
-          // 1. Fetch historical database records
-          final records = await StorageService.fetchHistory(p.rawPublicKey);
-          List<ChatMessage> loadedMessages = [];
-          
-          for (var record in records) {
-            // 2. Read the clean cleartext payload directly without legacy RSA decryption
-            final String messageText = record['payload'] ?? '';
-
-            loadedMessages.add(
-              ChatMessage(
-                messageText,
-                record['isMe'] == true,
-                customTime: DateTime.parse(record['timestamp']),
-                customId: record['id'],
-              )..isRead = record['isRead'] == true,
-            );
-          }
-
-          setState(() {
-            p.messages = loadedMessages;
-            _selectedPeer = p;
-            _autoScroll = true;
-          });
-          
-          _scrollToBottom();
-
-          // 3. Send read receipts for any newly viewed unread messages
-          for (var m in p.messages) {
-            if (!m.isMe && !m.isRead) {
-              _sendReadReceipt(p.rawPublicKey, m.id);
-              m.isRead = true;
-            }
-          }
-        },
+        onTap: () => _selectAndLoadPeer(p),
         child: CircleAvatar(
           radius: 20,
           backgroundColor: _selectedPeer == p
