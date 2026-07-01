@@ -346,7 +346,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                               )).toList(),
                             ),
                           ),
-                          const Divider(color: Colors.white10, height: 1),
+                          const Divider(color: Colors.white10, height: 8),
                           IconButton(
                             icon: const Icon(Icons.settings, color: Colors.white30, size: 20),
                             onPressed: _showSettingsDialog,
@@ -355,7 +355,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                             icon: const Icon(Icons.vpn_key, color: Colors.white30, size: 20),
                             onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
                           ),
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 8),
                         ]),
                       ),
                     ),
