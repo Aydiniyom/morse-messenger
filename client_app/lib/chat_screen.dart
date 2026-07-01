@@ -13,8 +13,13 @@ class DecentralizedChat extends StatefulWidget {
 }
 
 class _DecentralizedChatState extends State<DecentralizedChat> {
-  final _msgController = TextEditingController(), _keyInputController = TextEditingController(), _nameController = TextEditingController();
+  final _msgController = TextEditingController(),
+      _keyInputController = TextEditingController(),
+      _nameController = TextEditingController();
   final _ipController = TextEditingController();
+
+  final ScrollController _scrollController = ScrollController();
+  bool _autoScroll = true;
 
   // Track the server location dynamically
   String _serverIp = "localhost:8080";
@@ -43,12 +48,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     try {
       _channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
 
-      _channel!.sink.add(jsonEncode({
-        "type": "register", 
-        "fromUser": _myRawPublicKey, 
-        "toUser": "", 
-        "payload": ""
-      }));
+      _channel!.sink.add(
+        jsonEncode({
+          "type": "register",
+          "fromUser": _myRawPublicKey,
+          "toUser": "",
+          "payload": "",
+        }),
+      );
 
       _channel!.stream.listen(
         (rawData) => _handleIncomingPacket(rawData.toString()),
@@ -61,7 +68,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
   void _loadOrCreateIdentity() async {
     String? savedKeyPem = await StorageService.readPrivateKey();
-    
+
     RSAKeypair kp;
 
     if (savedKeyPem != null) {
@@ -92,7 +99,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       if (payloadMap['isReceipt'] == true) {
         final String targetMsgId = payloadMap['msgId'];
         setState(() {
-          final peer = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
+          final peer = _peers.firstWhere(
+            (p) => p.rawPublicKey.trim() == senderPublicKey,
+          );
           final msg = peer.messages.firstWhere((m) => m.id == targetMsgId);
           msg.isRead = true;
         });
@@ -103,18 +112,30 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       final String msgId = payloadMap['msgId'];
       final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
 
-      bool peerExists = _peers.any((p) => p.rawPublicKey.trim() == senderPublicKey);
+      bool peerExists = _peers.any(
+        (p) => p.rawPublicKey.trim() == senderPublicKey,
+      );
 
       if (peerExists) {
         setState(() {
-          final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
+          final sender = _peers.firstWhere(
+            (p) => p.rawPublicKey.trim() == senderPublicKey,
+          );
           if (!sender.messages.any((m) => m.id == msgId)) {
-            sender.messages.add(ChatMessage(messageText, false, customTime: sentTime, customId: msgId));
+            sender.messages.add(
+              ChatMessage(
+                messageText,
+                false,
+                customTime: sentTime,
+                customId: msgId,
+              ),
+            );
           }
           if (_selectedPeer == sender) {
             _sendReadReceipt(senderPublicKey, msgId);
           }
         });
+        _scrollToBottom();
       } else {
         Dialogs.showUnknownPeerDialog(
           context: context,
@@ -125,7 +146,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           onAccept: (nickname, acceptedMsgId, acceptedTime) {
             setState(() {
               final newPeer = ChatPeer(senderPublicKey, nickname);
-              newPeer.messages.add(ChatMessage(messageText, false, customTime: acceptedTime, customId: acceptedMsgId));
+              newPeer.messages.add(
+                ChatMessage(
+                  messageText,
+                  false,
+                  customTime: acceptedTime,
+                  customId: acceptedMsgId,
+                ),
+              );
               _peers.add(newPeer);
               _selectedPeer ??= newPeer;
               _sendReadReceipt(senderPublicKey, acceptedMsgId);
@@ -140,33 +168,48 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     if (_channel == null) return;
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
     final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
-    
-    _channel!.sink.add(jsonEncode({
-      "type": "message",
-      "fromUser": _myRawPublicKey,
-      "toUser": targetKey.trim(),
-      "payload": recipientPublicKeyObj.encrypt(receiptPayload)
-    }));
+
+    _channel!.sink.add(
+      jsonEncode({
+        "type": "message",
+        "fromUser": _myRawPublicKey,
+        "toUser": targetKey.trim(),
+        "payload": recipientPublicKeyObj.encrypt(receiptPayload),
+      }),
+    );
   }
 
   void _handleConnectNewPeer(String nickname, String key) {
     bool alreadyExists = _peers.any((p) => p.rawPublicKey.trim() == key);
     if (alreadyExists) {
-      setState(() { _selectedPeer = _peers.firstWhere((p) => p.rawPublicKey.trim() == key); });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Chat with this key already exists! Switching to chat.')));
+      setState(() {
+        _selectedPeer = _peers.firstWhere((p) => p.rawPublicKey.trim() == key);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Chat with this key already exists! Switching to chat.',
+          ),
+        ),
+      );
     } else {
       setState(() => _peers.add(ChatPeer(key, nickname)));
       _selectedPeer ??= _peers.last;
     }
-    _keyInputController.clear(); _nameController.clear();
+    _keyInputController.clear();
+    _nameController.clear();
   }
 
   void _sendMessage() {
-    if (_msgController.text.isNotEmpty && _selectedPeer != null && _channel != null) {
+    if (_msgController.text.isNotEmpty &&
+        _selectedPeer != null &&
+        _channel != null) {
       final text = _msgController.text;
       final newMsg = ChatMessage(text, true);
-      final recipientPublicKeyObj = RSAPublicKey.fromString(_selectedPeer!.rawPublicKey.trim());
-      
+      final recipientPublicKeyObj = RSAPublicKey.fromString(
+        _selectedPeer!.rawPublicKey.trim(),
+      );
+
       final messagePayload = jsonEncode({
         "isReceipt": false,
         "text": text,
@@ -174,15 +217,32 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         "timestamp": newMsg.timestamp.toIso8601String(),
       });
 
-      _channel!.sink.add(jsonEncode({
-        "type": "message", 
-        "fromUser": _myRawPublicKey, 
-        "toUser": _selectedPeer!.rawPublicKey.trim(), 
-        "payload": recipientPublicKeyObj.encrypt(messagePayload)
-      }));
-      
-      setState(() { _selectedPeer!.messages.add(newMsg); });
+      _channel!.sink.add(
+        jsonEncode({
+          "type": "message",
+          "fromUser": _myRawPublicKey,
+          "toUser": _selectedPeer!.rawPublicKey.trim(),
+          "payload": recipientPublicKeyObj.encrypt(messagePayload),
+        }),
+      );
+
+      setState(() {
+        _selectedPeer!.messages.add(newMsg);
+      });
       _msgController.clear();
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    if (_autoScroll && _scrollController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      });
     }
   }
 
@@ -190,12 +250,22 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          'Settings',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Network Target', style: TextStyle(fontSize: 12, color: Colors.tealAccent, fontWeight: FontWeight.bold)),
+            const Text(
+              'Network Target',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.tealAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
             const SizedBox(height: 8),
             TextField(
               controller: _ipController,
@@ -209,7 +279,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white30)),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Colors.white30),
+            ),
           ),
           ElevatedButton(
             onPressed: () {
@@ -220,7 +293,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 _initializeWebSocket();
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Reconnecting secure pipe to: $_serverIp')),
+                  SnackBar(
+                    content: Text('Reconnecting secure pipe to: $_serverIp'),
+                  ),
                 );
               }
             },
@@ -232,74 +307,111 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   Widget _buildFullSidebarContent() {
-    return Column(children: [
-      SizedBox(
-        height: 73, 
-        child: Center(
-          child: ListTile(
-            title: const Text('Morse Messenger', style: TextStyle(fontWeight: FontWeight.bold)),
-            trailing: IconButton(
-              icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent), 
-              onPressed: () => Dialogs.showAddPeer(
-                context: context,
-                nameController: _nameController,
-                keyInputController: _keyInputController,
-                onConnect: _handleConnectNewPeer,
+    return Column(
+      children: [
+        SizedBox(
+          height: 73,
+          child: Center(
+            child: ListTile(
+              title: const Text(
+                'Morse Messenger',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              trailing: IconButton(
+                icon: const Icon(
+                  Icons.add_circle_outline,
+                  color: Colors.tealAccent,
+                ),
+                onPressed: () => Dialogs.showAddPeer(
+                  context: context,
+                  nameController: _nameController,
+                  keyInputController: _keyInputController,
+                  onConnect: _handleConnectNewPeer,
+                ),
               ),
             ),
           ),
         ),
-      ),
-      const Divider(color: Colors.white10, height: 1),
-      Expanded(child: ListView(children: _peers.map((p) => ListTile(
-        selected: _selectedPeer == p, selectedTileColor: Colors.white10,
-        leading: CircleAvatar(backgroundColor: Colors.tealAccent.withValues(alpha: 0.1), child: Text(p.nickname[0].toUpperCase(), style: const TextStyle(color: Colors.tealAccent))),
-        title: Text(p.nickname),
-        onTap: () {
-          setState(() {
-            _selectedPeer = p;
-            _isMobileSidebarExpanded = false; 
-          });
-          for (var m in p.messages) {
-            if (!m.isMe && !m.isRead) {
-              _sendReadReceipt(p.rawPublicKey, m.id);
-              m.isRead = true;
-            }
-          }
-        },
-      )).toList())),
-      const Divider(color: Colors.white10, height: 1),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
-        child: Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent, side: const BorderSide(color: Colors.white10)),
-                icon: const Icon(Icons.vpn_key, size: 14),
-                label: const Text('Identity', style: TextStyle(fontSize: 11)),
-                onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
-              ),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              style: IconButton.styleFrom(
-                side: const BorderSide(color: Colors.white10),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-              icon: const Icon(Icons.settings, color: Colors.white70, size: 18),
-              onPressed: _showSettingsDialog,
-            )
-          ],
+        const Divider(color: Colors.white10, height: 1),
+        Expanded(
+          child: ListView(
+            children: _peers
+                .map(
+                  (p) => ListTile(
+                    selected: _selectedPeer == p,
+                    selectedTileColor: Colors.white10,
+                    leading: CircleAvatar(
+                      backgroundColor: Colors.tealAccent.withValues(alpha: 0.1),
+                      child: Text(
+                        p.nickname[0].toUpperCase(),
+                        style: const TextStyle(color: Colors.tealAccent),
+                      ),
+                    ),
+                    title: Text(p.nickname),
+                    onTap: () {
+                      setState(() {
+                        _selectedPeer = p;
+                        _isMobileSidebarExpanded = false;
+                      });
+                      for (var m in p.messages) {
+                        if (!m.isMe && !m.isRead) {
+                          _sendReadReceipt(p.rawPublicKey, m.id);
+                          m.isRead = true;
+                        }
+                      }
+                    },
+                  ),
+                )
+                .toList(),
+          ),
         ),
-      )
-    ]);
+        const Divider(color: Colors.white10, height: 1),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.tealAccent,
+                    side: const BorderSide(color: Colors.white10),
+                  ),
+                  icon: const Icon(Icons.vpn_key, size: 14),
+                  label: const Text('Identity', style: TextStyle(fontSize: 11)),
+                  onPressed: () => Dialogs.showIdentityModal(
+                    context: context,
+                    shortId: _myShortId,
+                    rawPublicKey: _myRawPublicKey,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                style: IconButton.styleFrom(
+                  side: const BorderSide(color: Colors.white10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                icon: const Icon(
+                  Icons.settings,
+                  color: Colors.white70,
+                  size: 18,
+                ),
+                onPressed: _showSettingsDialog,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_myRawPublicKey.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    
+    if (_myRawPublicKey.isEmpty)
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+
     return Scaffold(
       body: LayoutBuilder(
         builder: (context, constraints) {
@@ -312,114 +424,245 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                   // --- RESPONSIVE SIDEBAR SWITCH PANEL ---
                   if (!isSmallScreen)
                     Container(
-                      width: 260, color: const Color(0xFF1A1A1A),
+                      width: 260,
+                      color: const Color(0xFF1A1A1A),
                       child: SafeArea(child: _buildFullSidebarContent()),
                     )
                   else
                     Container(
-                      width: 68, color: const Color(0xFF1A1A1A),
+                      width: 68,
+                      color: const Color(0xFF1A1A1A),
                       child: SafeArea(
-                        child: Column(children: [
-                          SizedBox(
-                            height: 73, 
-                            child: Center(
-                              child: IconButton(
-                                icon: const Icon(Icons.menu, color: Colors.tealAccent),
-                                onPressed: () => setState(() => _isMobileSidebarExpanded = true),
-                              ),
-                            ),
-                          ),
-                          const Divider(color: Colors.white10, height: 1),
-                          Expanded(
-                            child: ListView(
-                              padding: const EdgeInsets.symmetric(vertical: 8.0),
-                              children: _peers.map((p) => Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 8.0),
-                                child: GestureDetector(
-                                  onTap: () => setState(() => _selectedPeer = p),
-                                  child: CircleAvatar(
-                                    radius: 20,
-                                    backgroundColor: _selectedPeer == p ? Colors.tealAccent : Colors.white10,
-                                    child: Text(p.nickname[0].toUpperCase(), style: TextStyle(color: _selectedPeer == p ? Colors.black : Colors.tealAccent)),
+                        child: Column(
+                          children: [
+                            SizedBox(
+                              height: 73,
+                              child: Center(
+                                child: IconButton(
+                                  icon: const Icon(
+                                    Icons.menu,
+                                    color: Colors.tealAccent,
+                                  ),
+                                  onPressed: () => setState(
+                                    () => _isMobileSidebarExpanded = true,
                                   ),
                                 ),
-                              )).toList(),
+                              ),
                             ),
-                          ),
-                          const Divider(color: Colors.white10, height: 8),
-                          IconButton(
-                            icon: const Icon(Icons.settings, color: Colors.white30, size: 20),
-                            onPressed: _showSettingsDialog,
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.vpn_key, color: Colors.white30, size: 20),
-                            onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
-                          ),
-                          const SizedBox(height: 8),
-                        ]),
+                            const Divider(color: Colors.white10, height: 1),
+                            Expanded(
+                              child: ListView(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8.0,
+                                ),
+                                children: _peers
+                                    .map(
+                                      (p) => Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 8.0,
+                                        ),
+                                        child: GestureDetector(
+                                          onTap: () =>
+                                              setState(() => _selectedPeer = p),
+                                          child: CircleAvatar(
+                                            radius: 20,
+                                            backgroundColor: _selectedPeer == p
+                                                ? Colors.tealAccent
+                                                : Colors.white10,
+                                            child: Text(
+                                              p.nickname[0].toUpperCase(),
+                                              style: TextStyle(
+                                                color: _selectedPeer == p
+                                                    ? Colors.black
+                                                    : Colors.tealAccent,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                            ),
+                            const Divider(color: Colors.white10, height: 8),
+                            IconButton(
+                              icon: const Icon(
+                                Icons.settings,
+                                color: Colors.white30,
+                                size: 20,
+                              ),
+                              onPressed: _showSettingsDialog,
+                            ),
+                            IconButton(
+                              icon: const Icon(
+                                Icons.vpn_key,
+                                color: Colors.white30,
+                                size: 20,
+                              ),
+                              onPressed: () => Dialogs.showIdentityModal(
+                                context: context,
+                                shortId: _myShortId,
+                                rawPublicKey: _myRawPublicKey,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                          ],
+                        ),
                       ),
                     ),
 
                   // --- MAIN CONVERSATION SCREEN WRAPPER ---
                   Expanded(
                     child: _selectedPeer == null
-                      ? const Center(child: Text('No Active Secure Selection', style: TextStyle(color: Colors.white30)))
-                      : SafeArea(
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            SizedBox(
-                              height: 73, 
-                              child: Center(
-                                child: ListTile(
-                                  title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), 
-                                  subtitle: Text('Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace'))
-                                ),
-                              ),
+                        ? const Center(
+                            child: Text(
+                              'No Active Secure Selection',
+                              style: TextStyle(color: Colors.white30),
                             ),
-                            const Divider(height: 1, color: Colors.white10),
-                            Expanded(
-                              child: ListView(
-                                padding: const EdgeInsets.all(24),
-                                children: _selectedPeer!.messages.map((m) {
-                                  final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
-                                  return Align(
-                                    alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
-                                    child: Column(
-                                      crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                                      children: [
-                                        Container(
-                                          margin: const EdgeInsets.symmetric(vertical: 4), 
-                                          padding: const EdgeInsets.all(12),
-                                          decoration: BoxDecoration(
-                                            color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E), 
-                                            borderRadius: BorderRadius.circular(12),
-                                            border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null
-                                          ),
-                                          child: Text(m.text),
+                          )
+                        : SafeArea(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  height: 73,
+                                  child: Center(
+                                    child: ListTile(
+                                      title: Text(
+                                        _selectedPeer!.nickname,
+                                        style: const TextStyle(
+                                          color: Colors.tealAccent,
+                                          fontWeight: FontWeight.bold,
                                         ),
-                                        Padding(
-                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                          child: Text(
-                                            m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString,
-                                            style: const TextStyle(fontSize: 10, color: Colors.white30),
-                                          ),
+                                      ),
+                                      subtitle: Text(
+                                        'Target: ${_selectedPeer!.shortId}',
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          fontFamily: 'monospace',
                                         ),
-                                      ],
+                                      ),
                                     ),
-                                  );
-                                }).toList(),
-                              ),
+                                  ),
+                                ),
+                                const Divider(height: 1, color: Colors.white10),
+                                Expanded(
+                                  child: NotificationListener(
+                                    onNotification: (ScrollNotification scrollInfo) {
+                                      // Check if user is at or very close to the bottom edge (within 10 pixels)
+                                      final isAtBottom =
+                                          scrollInfo.metrics.pixels >=
+                                          (scrollInfo.metrics.maxScrollExtent -
+                                              10);
+
+                                      if (isAtBottom && !_autoScroll) {
+                                        _autoScroll = true;
+                                      } else if (!isAtBottom && _autoScroll) {
+                                        // User scrolled away up into history, disable stick-to-bottom behavior
+                                        _autoScroll = false;
+                                      }
+                                      return true;
+                                    },
+                                    child: ListView(
+                                      controller: _scrollController,
+                                      padding: const EdgeInsets.all(24),
+                                      children: _selectedPeer!.messages.map((
+                                        m,
+                                      ) {
+                                        final String timeString =
+                                            "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
+                                        return Align(
+                                          alignment: m.isMe
+                                              ? Alignment.centerRight
+                                              : Alignment.centerLeft,
+                                          child: Column(
+                                            crossAxisAlignment: m.isMe
+                                                ? CrossAxisAlignment.end
+                                                : CrossAxisAlignment.start,
+                                            children: [
+                                              Container(
+                                                margin:
+                                                    const EdgeInsets.symmetric(
+                                                      vertical: 4,
+                                                    ),
+                                                padding: const EdgeInsets.all(
+                                                  12,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  color: m.isMe
+                                                      ? const Color(0xFF0B0B0B)
+                                                      : const Color(0xFF1E1E1E),
+                                                  borderRadius:
+                                                      BorderRadius.circular(12),
+                                                  border: m.isMe
+                                                      ? Border.all(
+                                                          color: Colors.white10,
+                                                          width: 0.5,
+                                                        )
+                                                      : null,
+                                                ),
+                                                child: Text(m.text),
+                                              ),
+                                              Padding(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 4,
+                                                      vertical: 2,
+                                                    ),
+                                                child: Text(
+                                                  m.isMe
+                                                      ? "$timeString ${m.isRead ? '✓✓' : '✓'}"
+                                                      : timeString,
+                                                  style: const TextStyle(
+                                                    fontSize: 10,
+                                                    color: Colors.white30,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.all(24.0),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: TextField(
+                                          controller: _msgController,
+                                          decoration: const InputDecoration(
+                                            hintText: 'Type your message...',
+                                            filled: true,
+                                            fillColor: Color(0xFF1E1E1E),
+                                            border: OutlineInputBorder(
+                                              borderRadius: BorderRadius.all(
+                                                Radius.circular(12),
+                                              ),
+                                              borderSide: BorderSide.none,
+                                            ),
+                                          ),
+                                          onSubmitted: (_) => _sendMessage(),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      FloatingActionButton(
+                                        backgroundColor: Colors.tealAccent,
+                                        onPressed: _sendMessage,
+                                        child: const Icon(
+                                          Icons.send_rounded,
+                                          color: Colors.black,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
                             ),
-                            Padding(
-                              padding: const EdgeInsets.all(24.0),
-                              child: Row(children: [
-                                Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)), onSubmitted: (_) => _sendMessage(),)),
-                                const SizedBox(width: 12),
-                                FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.send_rounded, color: Colors.black)),
-                              ]),
-                            )
-                          ]),
-                        ),
-                  )
+                          ),
+                  ),
                 ],
               ),
 
@@ -428,10 +671,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 IgnorePointer(
                   ignoring: !_isMobileSidebarExpanded,
                   child: GestureDetector(
-                    onTap: () => setState(() => _isMobileSidebarExpanded = false),
+                    onTap: () =>
+                        setState(() => _isMobileSidebarExpanded = false),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
-                      color: _isMobileSidebarExpanded ? Colors.black54 : Colors.transparent,
+                      color: _isMobileSidebarExpanded
+                          ? Colors.black54
+                          : Colors.transparent,
                     ),
                   ),
                 ),
@@ -448,8 +694,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                       child: _buildFullSidebarContent(),
                     ),
                   ),
-                )
-              ]
+                ),
+              ],
             ],
           );
         },
