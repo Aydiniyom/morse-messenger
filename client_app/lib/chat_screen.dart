@@ -61,65 +61,69 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _initializeWebSocket() async {
-  _channel?.sink.close();
-  
-  setState(() {
-    _isConnecting = true;
-  });
-
-  try {
-    final channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
-    _channel = channel;
-
-    await channel.ready;
+    _channel?.sink.close();
 
     setState(() {
-      _isServerConnected = true;
-      _isConnecting = false;
+      _isConnecting = true;
     });
 
-    _channel!.sink.add(
-      jsonEncode({
-        "type": "register",
-        "fromUser": _myRawPublicKey,
-        "toUser": "",
-        "payload": "",
-      }),
-    );
+    try {
+      final channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
+      _channel = channel;
 
-    _channel!.stream.listen(
-      (rawData) {
-        _handleIncomingPacket(rawData.toString());
-      },
-      onError: (err) {
-        debugPrint("WebSocket connection error: $err");
-        setState(() {
-          _isServerConnected = false;
-          _isConnecting = false;
-        });
-      },
-      onDone: () {
-        debugPrint("WebSocket channel closed by host.");
-        setState(() {
-          _isServerConnected = false;
-          _isConnecting = false;
-        });
-      },
-    );
-  } catch (e) {
-    debugPrint("Handshake failed completely: $e");
-    setState(() {
-      _isServerConnected = false;
-      _isConnecting = false;
-    });
-    
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to connect to $_serverIp. Check address or server status.')),
+      await channel.ready;
+
+      setState(() {
+        _isServerConnected = true;
+        _isConnecting = false;
+      });
+
+      _channel!.sink.add(
+        jsonEncode({
+          "type": "register",
+          "fromUser": _myRawPublicKey,
+          "toUser": "",
+          "payload": "",
+        }),
       );
+
+      _channel!.stream.listen(
+        (rawData) {
+          _handleIncomingPacket(rawData.toString());
+        },
+        onError: (err) {
+          debugPrint("WebSocket connection error: $err");
+          setState(() {
+            _isServerConnected = false;
+            _isConnecting = false;
+          });
+        },
+        onDone: () {
+          debugPrint("WebSocket channel closed by host.");
+          setState(() {
+            _isServerConnected = false;
+            _isConnecting = false;
+          });
+        },
+      );
+    } catch (e) {
+      debugPrint("Handshake failed completely: $e");
+      setState(() {
+        _isServerConnected = false;
+        _isConnecting = false;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed to connect to $_serverIp. Check address or server status.',
+            ),
+          ),
+        );
+      }
     }
   }
-}
 
   void _loadOrCreateIdentity() async {
     String? savedKeyPem = await StorageService.readPrivateKey();
@@ -530,7 +534,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.waving_hand_rounded, size: 64, color: Colors.tealAccent),
+              const Icon(
+                Icons.waving_hand_rounded,
+                size: 64,
+                color: Colors.tealAccent,
+              ),
               const SizedBox(height: 24),
               const Text(
                 'Welcome to Morse Messenger!',
