@@ -64,7 +64,7 @@ class MyApp extends StatelessWidget {
 
         dialogTheme: const DialogThemeData(
           backgroundColor: surfaceCard,
-          surfaceTintColor: Colors.transparent, // Prevents Material 3's purple tinting tint
+          surfaceTintColor: Colors.transparent,
         ),
       ),
       home: const DecentralizedChat(),
