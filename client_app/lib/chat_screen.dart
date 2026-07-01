@@ -347,15 +347,64 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 12),
             TextField(
               controller: _ipController,
               decoration: const InputDecoration(
                 hintText: "e.g. localhost:8080",
-                labelText: "Server IP / Host address",
-                labelStyle: TextStyle(
-                  color: Colors.white70,
-                )
+                labelText: "Server address",
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Divider(color: Colors.white10),
+            const SizedBox(height: 12),
+            const Text(
+              'Danger Zone',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.redAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent, width: 0.5),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                icon: const Icon(Icons.refresh_rounded, size: 16),
+                label: const Text('Reset Identity', style: TextStyle(fontSize: 13)),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  
+                  showDialog(
+                    context: context,
+                    builder: (confirmCtx) => AlertDialog(
+                      title: const Text('Are you absolutely sure?'),
+                      content: const Text(
+                        'This actions destroys your identity permanently. '
+                        'Your old peers will no longer be able to read your incoming payloads.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(confirmCtx),
+                          child: const Text('Cancel'),
+                        ),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                          onPressed: () {
+                            Navigator.pop(confirmCtx);
+                            _resetIdentity();
+                          },
+                          child: const Text('Wipe & Re-key', style: TextStyle(color: Colors.white)),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
             ),
           ],
@@ -385,6 +434,32 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         ],
       ),
     );
+  }
+
+  void _resetIdentity() async {
+    // 1. Generate a brand new random RSA Keypair
+    final kp = RSAKeypair.fromRandom();
+    
+    // 2. Overwrite the old PEM string in your persistent storage service
+    await StorageService.savePrivateKey(kp.privateKey.toString());
+
+    // 3. Update state variables and wipe current peers to prevent mismatch encryption
+    setState(() {
+      _privKey = kp.privateKey;
+      _myRawPublicKey = kp.publicKey.toString().trim();
+      _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
+      _peers.clear();
+      _selectedPeer = null;
+    });
+
+    // 4. Force a fresh WebSocket registration pipe with the new key footprint
+    _initializeWebSocket();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Identity cleared. New secure key pairs deployed.')),
+      );
+    }
   }
 
   Widget _buildFullSidebarContent() {
