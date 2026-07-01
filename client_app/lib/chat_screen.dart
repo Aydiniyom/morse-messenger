@@ -14,7 +14,12 @@ class DecentralizedChat extends StatefulWidget {
 
 class _DecentralizedChatState extends State<DecentralizedChat> {
   final _msgController = TextEditingController(), _keyInputController = TextEditingController(), _nameController = TextEditingController();
-  final _channel = WebSocketChannel.connect(Uri.parse('ws://localhost:8080/ws'));
+  final _ipController = TextEditingController();
+
+  // Track the server location dynamically
+  String _serverIp = "localhost:8080";
+  WebSocketChannel? _channel;
+
   late RSAPrivateKey _privKey;
   String _myRawPublicKey = "";
   String _myShortId = "";
@@ -27,7 +32,31 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   @override
   void initState() {
     super.initState();
+    _ipController.text = _serverIp;
     _loadOrCreateIdentity(); // do this upon startup
+  }
+
+  void _initializeWebSocket() {
+    // Close existing connection if we are changing endpoints
+    _channel?.sink.close();
+
+    try {
+      _channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
+
+      _channel!.sink.add(jsonEncode({
+        "type": "register", 
+        "fromUser": _myRawPublicKey, 
+        "toUser": "", 
+        "payload": ""
+      }));
+
+      _channel!.stream.listen(
+        (rawData) => _handleIncomingPacket(rawData.toString()),
+        onError: (err) => debugPrint("WebSocket connection dropped: $err"),
+      );
+    } catch (e) {
+      debugPrint("WebSocket failed to establish: $e");
+    }
   }
 
   void _loadOrCreateIdentity() async {
@@ -49,16 +78,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
     });
 
-    _channel.sink.add(jsonEncode({
-      "type": "register", 
-      "fromUser": _myRawPublicKey, 
-      "toUser": "", 
-      "payload": ""
-    }));
-
-    _channel.stream.listen((rawData) {
-      _handleIncomingPacket(rawData.toString());
-    });
+    _initializeWebSocket();
   }
 
   void _handleIncomingPacket(String rawData) {
@@ -117,10 +137,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _sendReadReceipt(String targetKey, String messageId) {
+    if (_channel == null) return;
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
     final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
     
-    _channel.sink.add(jsonEncode({
+    _channel!.sink.add(jsonEncode({
       "type": "message",
       "fromUser": _myRawPublicKey,
       "toUser": targetKey.trim(),
@@ -141,7 +162,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _sendMessage() {
-    if (_msgController.text.isNotEmpty && _selectedPeer != null) {
+    if (_msgController.text.isNotEmpty && _selectedPeer != null && _channel != null) {
       final text = _msgController.text;
       final newMsg = ChatMessage(text, true);
       final recipientPublicKeyObj = RSAPublicKey.fromString(_selectedPeer!.rawPublicKey.trim());
@@ -153,7 +174,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         "timestamp": newMsg.timestamp.toIso8601String(),
       });
 
-      _channel.sink.add(jsonEncode({
+      _channel!.sink.add(jsonEncode({
         "type": "message", 
         "fromUser": _myRawPublicKey, 
         "toUser": _selectedPeer!.rawPublicKey.trim(), 
@@ -165,10 +186,55 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     }
   }
 
+  void _showSettingsDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Network Target', style: TextStyle(fontSize: 12, color: Colors.tealAccent, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _ipController,
+              decoration: const InputDecoration(
+                hintText: "e.g. localhost:8080",
+                labelText: "Server IP / Host address",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white30)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (_ipController.text.isNotEmpty) {
+                setState(() {
+                  _serverIp = _ipController.text.trim();
+                });
+                _initializeWebSocket();
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Reconnecting secure pipe to: $_serverIp')),
+                );
+              }
+            },
+            child: const Text('Save & Connect'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildFullSidebarContent() {
     return Column(children: [
       SizedBox(
-        height: 73, // Aligned with header height
+        height: 73, 
         child: Center(
           child: ListTile(
             title: const Text('Morse Messenger', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -202,16 +268,29 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           }
         },
       )).toList())),
+      const Divider(color: Colors.white10, height: 1),
       Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent, side: const BorderSide(color: Colors.white10)),
-            icon: const Icon(Icons.vpn_key, size: 16),
-            label: const Text('Show Identity Key', style: TextStyle(fontSize: 12)),
-            onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
-          ),
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent, side: const BorderSide(color: Colors.white10)),
+                icon: const Icon(Icons.vpn_key, size: 14),
+                label: const Text('Identity', style: TextStyle(fontSize: 11)),
+                onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              style: IconButton.styleFrom(
+                side: const BorderSide(color: Colors.white10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              icon: const Icon(Icons.settings, color: Colors.white70, size: 18),
+              onPressed: _showSettingsDialog,
+            )
+          ],
         ),
       )
     ]);
@@ -242,7 +321,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                       child: SafeArea(
                         child: Column(children: [
                           SizedBox(
-                            height: 73, // Unified line height
+                            height: 73, 
                             child: Center(
                               child: IconButton(
                                 icon: const Icon(Icons.menu, color: Colors.tealAccent),
@@ -267,8 +346,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                               )).toList(),
                             ),
                           ),
+                          const Divider(color: Colors.white10, height: 1),
                           IconButton(
-                            icon: const Icon(Icons.vpn_key, color: Colors.white30),
+                            icon: const Icon(Icons.settings, color: Colors.white30, size: 20),
+                            onPressed: _showSettingsDialog,
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.vpn_key, color: Colors.white30, size: 20),
                             onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
                           ),
                           const SizedBox(height: 16),
@@ -283,7 +367,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                       : SafeArea(
                           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                             SizedBox(
-                              height: 73, // Unified line height
+                              height: 73, 
                               child: Center(
                                 child: ListTile(
                                   title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), 
@@ -330,7 +414,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                               child: Row(children: [
                                 Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
                                 const SizedBox(width: 12),
-                                FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.lock, color: Colors.black)),
+                                FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.send_rounded, color: Colors.black)),
                               ]),
                             )
                           ]),
@@ -341,7 +425,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
               // --- ANIMATED OVERLAY DRAWER PANEL ---
               if (isSmallScreen) ...[
-                // fade-in translucent background veil
                 IgnorePointer(
                   ignoring: !_isMobileSidebarExpanded,
                   child: GestureDetector(
@@ -352,7 +435,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                     ),
                   ),
                 ),
-                // Smooth horizontal slide panel setup
                 AnimatedPositioned(
                   duration: const Duration(milliseconds: 250),
                   curve: Curves.easeInOutCubic,
