@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:crypton/crypton.dart';
@@ -21,14 +22,21 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   final List<ChatPeer> _peers = [];
   ChatPeer? _selectedPeer;
 
+  // Track if the overlay sidebar is opened manually on small screens
+  bool _isMobileSidebarExpanded = false;
+
   @override
   void initState() {
     super.initState();
-    _loadOrCreateIdentity();
+    _loadOrCreateIdentity(); // do this upon startup
   }
 
   void _loadOrCreateIdentity() async {
+    final bool isInstanceB = Platform.environment['XDG_DATA_HOME'] != null;
+    final String targetSlot = isInstanceB ? 'user_private_key_pem_b' : 'user_private_key_pem';
+
     String? savedKeyPem = await StorageService.readPrivateKey();
+    
     RSAKeypair kp;
 
     if (savedKeyPem != null) {
@@ -61,7 +69,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     try {
       final data = jsonDecode(rawData);
       final String senderPublicKey = data['fromUser'].toString().trim();
-      
+
       final decryptedPayload = _privKey.decrypt(data['payload']);
       final Map<String, dynamic> payloadMap = jsonDecode(decryptedPayload);
 
@@ -114,11 +122,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
   void _sendReadReceipt(String targetKey, String messageId) {
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    
-    final receiptPayload = jsonEncode({
-      "isReceipt": true,
-      "msgId": messageId,
-    });
+    final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
     
     _channel.sink.add(jsonEncode({
       "type": "message",
@@ -144,7 +148,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     if (_msgController.text.isNotEmpty && _selectedPeer != null) {
       final text = _msgController.text;
       final newMsg = ChatMessage(text, true);
-      
       final recipientPublicKeyObj = RSAPublicKey.fromString(_selectedPeer!.rawPublicKey.trim());
       
       final messagePayload = jsonEncode({
@@ -166,123 +169,212 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     }
   }
 
+  Widget _buildFullSidebarContent() {
+    return Column(children: [
+      SizedBox(
+        height: 73, // Aligned with header height
+        child: Center(
+          child: ListTile(
+            title: const Text('Morse Messenger', style: TextStyle(fontWeight: FontWeight.bold)),
+            trailing: IconButton(
+              icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent), 
+              onPressed: () => Dialogs.showAddPeer(
+                context: context,
+                nameController: _nameController,
+                keyInputController: _keyInputController,
+                onConnect: _handleConnectNewPeer,
+              ),
+            ),
+          ),
+        ),
+      ),
+      const Divider(color: Colors.white10, height: 1),
+      Expanded(child: ListView(children: _peers.map((p) => ListTile(
+        selected: _selectedPeer == p, selectedTileColor: Colors.white10,
+        leading: CircleAvatar(backgroundColor: Colors.tealAccent.withValues(alpha: 0.1), child: Text(p.nickname[0].toUpperCase(), style: const TextStyle(color: Colors.tealAccent))),
+        title: Text(p.nickname),
+        onTap: () {
+          setState(() {
+            _selectedPeer = p;
+            _isMobileSidebarExpanded = false; 
+          });
+          for (var m in p.messages) {
+            if (!m.isMe && !m.isRead) {
+              _sendReadReceipt(p.rawPublicKey, m.id);
+              m.isRead = true;
+            }
+          }
+        },
+      )).toList())),
+      Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent, side: const BorderSide(color: Colors.white10)),
+            icon: const Icon(Icons.vpn_key, size: 16),
+            label: const Text('Show Identity Key', style: TextStyle(fontSize: 12)),
+            onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
+          ),
+        ),
+      )
+    ]);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_myRawPublicKey.isEmpty) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    
     return Scaffold(
-      body: Row(
-        children: [
-          Container(
-            width: 260, color: const Color(0xFF1A1A1A),
-            child: SafeArea(
-              child: Column(children: [
-                SizedBox(
-                  height: 72,
-                  child: Center(
-                    child: ListTile(
-                      title: const Text('Morse Messenger', style: TextStyle(fontWeight: FontWeight.bold)),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent), 
-                        onPressed: () => Dialogs.showAddPeer(
-                          context: context,
-                          nameController: _nameController,
-                          keyInputController: _keyInputController,
-                          onConnect: _handleConnectNewPeer,
-                        ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final bool isSmallScreen = constraints.maxWidth < 700;
+
+          return Stack(
+            children: [
+              Row(
+                children: [
+                  // --- RESPONSIVE SIDEBAR SWITCH PANEL ---
+                  if (!isSmallScreen)
+                    Container(
+                      width: 260, color: const Color(0xFF1A1A1A),
+                      child: SafeArea(child: _buildFullSidebarContent()),
+                    )
+                  else
+                    Container(
+                      width: 68, color: const Color(0xFF1A1A1A),
+                      child: SafeArea(
+                        child: Column(children: [
+                          SizedBox(
+                            height: 73, // Unified line height
+                            child: Center(
+                              child: IconButton(
+                                icon: const Icon(Icons.menu, color: Colors.tealAccent),
+                                onPressed: () => setState(() => _isMobileSidebarExpanded = true),
+                              ),
+                            ),
+                          ),
+                          const Divider(color: Colors.white10, height: 1),
+                          Expanded(
+                            child: ListView(
+                              padding: const EdgeInsets.symmetric(vertical: 8.0),
+                              children: _peers.map((p) => Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 8.0),
+                                child: GestureDetector(
+                                  onTap: () => setState(() => _selectedPeer = p),
+                                  child: CircleAvatar(
+                                    radius: 20,
+                                    backgroundColor: _selectedPeer == p ? Colors.tealAccent : Colors.white10,
+                                    child: Text(p.nickname[0].toUpperCase(), style: TextStyle(color: _selectedPeer == p ? Colors.black : Colors.tealAccent)),
+                                  ),
+                                ),
+                              )).toList(),
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.vpn_key, color: Colors.white30),
+                            onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
+                          ),
+                          const SizedBox(height: 16),
+                        ]),
                       ),
+                    ),
+
+                  // --- MAIN CONVERSATION SCREEN WRAPPER ---
+                  Expanded(
+                    child: _selectedPeer == null
+                      ? const Center(child: Text('No Active Secure Selection', style: TextStyle(color: Colors.white30)))
+                      : SafeArea(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            SizedBox(
+                              height: 73, // Unified line height
+                              child: Center(
+                                child: ListTile(
+                                  title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), 
+                                  subtitle: Text('Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace'))
+                                ),
+                              ),
+                            ),
+                            const Divider(height: 1, color: Colors.white10),
+                            Expanded(
+                              child: ListView(
+                                padding: const EdgeInsets.all(24),
+                                children: _selectedPeer!.messages.map((m) {
+                                  final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
+                                  return Align(
+                                    alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
+                                    child: Column(
+                                      crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                                      children: [
+                                        Container(
+                                          margin: const EdgeInsets.symmetric(vertical: 4), 
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E), 
+                                            borderRadius: BorderRadius.circular(12),
+                                            border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null
+                                          ),
+                                          child: Text(m.text),
+                                        ),
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                          child: Text(
+                                            m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString,
+                                            style: const TextStyle(fontSize: 10, color: Colors.white30),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.all(24.0),
+                              child: Row(children: [
+                                Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
+                                const SizedBox(width: 12),
+                                FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.lock, color: Colors.black)),
+                              ]),
+                            )
+                          ]),
+                        ),
+                  )
+                ],
+              ),
+
+              // --- ANIMATED OVERLAY DRAWER PANEL ---
+              if (isSmallScreen) ...[
+                // fade-in translucent background veil
+                IgnorePointer(
+                  ignoring: !_isMobileSidebarExpanded,
+                  child: GestureDetector(
+                    onTap: () => setState(() => _isMobileSidebarExpanded = false),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      color: _isMobileSidebarExpanded ? Colors.black54 : Colors.transparent,
                     ),
                   ),
                 ),
-                const Divider(color: Colors.white10, height: 1),
-                Expanded(child: ListView(children: _peers.map((p) => ListTile(
-                  selected: _selectedPeer == p, selectedTileColor: Colors.white10,
-                  leading: CircleAvatar(backgroundColor: Colors.tealAccent.withOpacity(0.1), child: Text(p.nickname[0].toUpperCase(), style: const TextStyle(color: Colors.tealAccent))),
-                  title: Text(p.nickname),
-                  onTap: () {
-                    setState(() => _selectedPeer = p);
-                    for (var m in p.messages) {
-                      if (!m.isMe && !m.isRead) {
-                        _sendReadReceipt(p.rawPublicKey, m.id);
-                        m.isRead = true;
-                      }
-                    }
-                  },
-                )).toList())),
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(foregroundColor: Colors.tealAccent, side: const BorderSide(color: Colors.white10)),
-                      icon: const Icon(Icons.vpn_key, size: 16),
-                      label: const Text('Show Identity Key', style: TextStyle(fontSize: 12)),
-                      onPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
+                // Smooth horizontal slide panel setup
+                AnimatedPositioned(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOutCubic,
+                  left: _isMobileSidebarExpanded ? 0 : -260,
+                  top: 0,
+                  bottom: 0,
+                  child: SafeArea(
+                    child: Container(
+                      width: 260,
+                      color: const Color(0xFF1A1A1A),
+                      child: _buildFullSidebarContent(),
                     ),
                   ),
                 )
-              ]),
-            ),
-          ),
-          Expanded(
-            child: _selectedPeer == null
-              ? const Center(child: Text('No Active Secure Selection', style: TextStyle(color: Colors.white30)))
-              : SafeArea(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    SizedBox(
-                      height: 72,
-                      child: Center(
-                        child: ListTile(
-                          title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)), 
-                          subtitle: Text('Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace'))
-                        ),
-                      ),
-                    ),
-                    const Divider(height: 1, color: Colors.white10),
-                    Expanded(
-                      child: ListView(
-                        padding: const EdgeInsets.all(24),
-                        children: _selectedPeer!.messages.map((m) {
-                          final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
-                          return Align(
-                            alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
-                            child: Column(
-                              crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                              children: [
-                                Container(
-                                  margin: const EdgeInsets.symmetric(vertical: 4), 
-                                  padding: const EdgeInsets.all(12),
-                                  decoration: BoxDecoration(
-                                    color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E), 
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null
-                                  ),
-                                  child: Text(m.text),
-                                ),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                  child: Text(
-                                    m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString,
-                                    style: const TextStyle(fontSize: 10, color: Colors.white30),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.all(24.0),
-                      child: Row(children: [
-                        Expanded(child: TextField(controller: _msgController, decoration: const InputDecoration(hintText: 'Type your message...', filled: true, fillColor: Color(0xFF1E1E1E), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none)))),
-                        const SizedBox(width: 12),
-                        FloatingActionButton(backgroundColor: Colors.tealAccent, onPressed: _sendMessage, child: const Icon(Icons.lock, color: Colors.black)),
-                      ]),
-                    )
-                  ]),
-                ),
-          )
-        ],
+              ]
+            ],
+          );
+        },
       ),
     );
   }
