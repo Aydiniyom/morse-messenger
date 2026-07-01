@@ -282,7 +282,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white30)),
+            child: const Text('Cancel'),
           ),
           ElevatedButton(
             onPressed: () {
