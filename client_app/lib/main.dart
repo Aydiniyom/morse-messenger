@@ -1,3 +1,4 @@
+import 'package:client_app/notification_service.dart';
 import 'package:flutter/material.dart';
 import 'chat_screen.dart';
 import 'storage_service.dart';
@@ -6,6 +7,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // ensure background folder paths are initialized before UI rendering
   await StorageService.initDatabase();
+  
+  await NotificationService.initialize();
 
   runApp(const MyApp());
 }
