@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:crypton/crypton.dart';
@@ -32,9 +31,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _loadOrCreateIdentity() async {
-    final bool isInstanceB = Platform.environment['XDG_DATA_HOME'] != null;
-    final String targetSlot = isInstanceB ? 'user_private_key_pem_b' : 'user_private_key_pem';
-
     String? savedKeyPem = await StorageService.readPrivateKey();
     
     RSAKeypair kp;
