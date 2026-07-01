@@ -71,9 +71,12 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
     try {
       // Cleanly parse out the scheme without losing any explicit pathing suffixes if provided
-      final wsUrl = _serverIp.startsWith("ws://") || _serverIp.startsWith("wss://")
+      final wsUrl =
+          _serverIp.startsWith("ws://") || _serverIp.startsWith("wss://")
           ? _serverIp
-          : _serverIp.endsWith('/ws') ? "ws://$_serverIp" : "ws://$_serverIp/ws";
+          : _serverIp.endsWith('/ws')
+          ? "ws://$_serverIp"
+          : "ws://$_serverIp/ws";
 
       final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
       _channel = channel;
@@ -160,7 +163,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       _myRawPublicKey = kp.publicKey.toString().trim();
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
       _peers.addAll(hydratedPeers);
-      
+
       // 3. If an IP was saved before, override the default "localhost:8080"
       if (savedIp != null && savedIp.isNotEmpty) {
         _serverIp = savedIp;
@@ -198,16 +201,23 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         final String base64Ciphertext = hybridBundle['ciphertext'];
 
         // Decrypt the AES key bundle via RSA
-        final decryptedKeyBundleString = _privKey.decrypt(rsaEncryptedKeyBundle);
-        final Map<String, dynamic> keyBundleMap = jsonDecode(decryptedKeyBundleString);
-        
+        final decryptedKeyBundleString = _privKey.decrypt(
+          rsaEncryptedKeyBundle,
+        );
+        final Map<String, dynamic> keyBundleMap = jsonDecode(
+          decryptedKeyBundleString,
+        );
+
         final aesKey = enc.Key.fromBase64(keyBundleMap['key']);
         final iv = enc.IV.fromBase64(keyBundleMap['iv']);
 
         // Decrypt the actual message text via AES
         final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.cbc));
-        final decryptedMessageTextPayload = encrypter.decrypt64(base64Ciphertext, iv: iv);
-        
+        final decryptedMessageTextPayload = encrypter.decrypt64(
+          base64Ciphertext,
+          iv: iv,
+        );
+
         parsedPayloadMap = jsonDecode(decryptedMessageTextPayload);
       }
 
@@ -220,7 +230,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       }
 
       // Send the clean, unpacked message text string down to persistence
-      _processIncomingMessage(senderPublicKey, parsedPayloadMap['text'] ?? '', parsedPayloadMap);
+      _processIncomingMessage(
+        senderPublicKey,
+        parsedPayloadMap['text'] ?? '',
+        parsedPayloadMap,
+      );
     } catch (e) {
       debugPrint("Hybrid decryption failed payload processing execution: $e");
     }
@@ -783,7 +797,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     setState(() {
       p.messages = loadedMessages;
       _selectedPeer = p;
-      _isMobileSidebarExpanded = false; // Automatically closes the drawer if it was open on mobile
+      _isMobileSidebarExpanded =
+          false; // Automatically closes the drawer if it was open on mobile
       _autoScroll = true;
     });
 
@@ -1079,7 +1094,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                           color: Colors.teal,
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        
                       ),
                 ),
               ),
