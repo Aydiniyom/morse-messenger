@@ -20,12 +20,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   final _nameController = TextEditingController();
   final _ipController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  
+  final FocusNode _msgFocusNode = FocusNode();
+
   final List<ChatPeer> _peers = [];
   ChatPeer? _selectedPeer;
   WebSocketChannel? _channel;
   late RSAPrivateKey _privKey;
-  
+
   String _serverIp = "localhost:8080";
   String _myRawPublicKey = "";
   String _myShortId = "";
@@ -39,16 +40,25 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     _loadOrCreateIdentity();
   }
 
+  @override
+  void dispose() {
+    _msgFocusNode.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
   void _initializeWebSocket() {
     _channel?.sink.close();
     try {
       _channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp/ws'));
-      _channel!.sink.add(jsonEncode({
-        "type": "register",
-        "fromUser": _myRawPublicKey,
-        "toUser": "",
-        "payload": "",
-      }));
+      _channel!.sink.add(
+        jsonEncode({
+          "type": "register",
+          "fromUser": _myRawPublicKey,
+          "toUser": "",
+          "payload": "",
+        }),
+      );
       _channel!.stream.listen(
         (rawData) => _handleIncomingPacket(rawData.toString()),
         onError: (err) => debugPrint("WebSocket connection dropped: $err"),
@@ -96,23 +106,39 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
   void _processReadReceipt(String senderPublicKey, String targetMsgId) {
     setState(() {
-      final peer = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
+      final peer = _peers.firstWhere(
+        (p) => p.rawPublicKey.trim() == senderPublicKey,
+      );
       final msg = peer.messages.firstWhere((m) => m.id == targetMsgId);
       msg.isRead = true;
     });
   }
 
-  void _processIncomingMessage(String senderPublicKey, Map<String, dynamic> payloadMap) {
+  void _processIncomingMessage(
+    String senderPublicKey,
+    Map<String, dynamic> payloadMap,
+  ) {
     final String messageText = payloadMap['text'];
     final String msgId = payloadMap['msgId'];
     final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
-    bool peerExists = _peers.any((p) => p.rawPublicKey.trim() == senderPublicKey);
+    bool peerExists = _peers.any(
+      (p) => p.rawPublicKey.trim() == senderPublicKey,
+    );
 
     if (peerExists) {
       setState(() {
-        final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
+        final sender = _peers.firstWhere(
+          (p) => p.rawPublicKey.trim() == senderPublicKey,
+        );
         if (!sender.messages.any((m) => m.id == msgId)) {
-          sender.messages.add(ChatMessage(messageText, false, customTime: sentTime, customId: msgId));
+          sender.messages.add(
+            ChatMessage(
+              messageText,
+              false,
+              customTime: sentTime,
+              customId: msgId,
+            ),
+          );
         }
         if (_selectedPeer == sender) {
           _sendReadReceipt(senderPublicKey, msgId);
@@ -129,7 +155,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         onAccept: (nickname, acceptedMsgId, acceptedTime) {
           setState(() {
             final newPeer = ChatPeer(senderPublicKey, nickname);
-            newPeer.messages.add(ChatMessage(messageText, false, customTime: acceptedTime, customId: acceptedMsgId));
+            newPeer.messages.add(
+              ChatMessage(
+                messageText,
+                false,
+                customTime: acceptedTime,
+                customId: acceptedMsgId,
+              ),
+            );
             _peers.add(newPeer);
             _selectedPeer ??= newPeer;
             _sendReadReceipt(senderPublicKey, acceptedMsgId);
@@ -145,12 +178,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
     final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
 
-    _channel!.sink.add(jsonEncode({
-      "type": "message",
-      "fromUser": _myRawPublicKey,
-      "toUser": targetKey.trim(),
-      "payload": recipientPublicKeyObj.encrypt(receiptPayload),
-    }));
+    _channel!.sink.add(
+      jsonEncode({
+        "type": "message",
+        "fromUser": _myRawPublicKey,
+        "toUser": targetKey.trim(),
+        "payload": recipientPublicKeyObj.encrypt(receiptPayload),
+      }),
+    );
   }
 
   void _handleConnectNewPeer(String nickname, String key) {
@@ -160,7 +195,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         _selectedPeer = _peers.firstWhere((p) => p.rawPublicKey.trim() == key);
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Chat with this key already exists! Switching to chat.')),
+        const SnackBar(
+          content: Text(
+            'Chat with this key already exists! Switching to chat.',
+          ),
+        ),
       );
     } else {
       setState(() => _peers.add(ChatPeer(key, nickname)));
@@ -171,11 +210,17 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _sendMessage() {
-    if (_msgController.text.isEmpty || _selectedPeer == null || _channel == null) return;
+    if (_msgController.text.isEmpty ||
+        _selectedPeer == null ||
+        _channel == null) {
+      return;
+    }
 
     final text = _msgController.text;
     final newMsg = ChatMessage(text, true);
-    final recipientPublicKeyObj = RSAPublicKey.fromString(_selectedPeer!.rawPublicKey.trim());
+    final recipientPublicKeyObj = RSAPublicKey.fromString(
+      _selectedPeer!.rawPublicKey.trim(),
+    );
 
     final messagePayload = jsonEncode({
       "isReceipt": false,
@@ -184,18 +229,22 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       "timestamp": newMsg.timestamp.toIso8601String(),
     });
 
-    _channel!.sink.add(jsonEncode({
-      "type": "message",
-      "fromUser": _myRawPublicKey,
-      "toUser": _selectedPeer!.rawPublicKey.trim(),
-      "payload": recipientPublicKeyObj.encrypt(messagePayload),
-    }));
+    _channel!.sink.add(
+      jsonEncode({
+        "type": "message",
+        "fromUser": _myRawPublicKey,
+        "toUser": _selectedPeer!.rawPublicKey.trim(),
+        "payload": recipientPublicKeyObj.encrypt(messagePayload),
+      }),
+    );
 
     setState(() {
       _selectedPeer!.messages.add(newMsg);
     });
+
     _msgController.clear();
     _scrollToBottom();
+    _msgFocusNode.requestFocus();
   }
 
   void _scrollToBottom() {
@@ -210,9 +259,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     }
   }
 
-  void _showDynamicContextMenu(BuildContext context, TapDownDetails details, ChatMessage message) {
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    
+  void _showDynamicContextMenu(
+    BuildContext context,
+    TapDownDetails details,
+    ChatMessage message,
+  ) {
+    final RenderBox overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+
     showMenu(
       context: context,
       position: RelativeRect.fromRect(
@@ -234,7 +288,11 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           value: 'delete',
           child: Row(
             children: [
-              Icon(Icons.delete_outline_rounded, size: 16, color: Colors.redAccent),
+              Icon(
+                Icons.delete_outline_rounded,
+                size: 16,
+                color: Colors.redAccent,
+              ),
               SizedBox(width: 10),
               Text('Delete', style: TextStyle(color: Colors.redAccent)),
             ],
@@ -246,7 +304,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Message copied to clipboard'), duration: Duration(seconds: 1)),
+          const SnackBar(
+            content: Text('Message copied to clipboard'),
+            duration: Duration(seconds: 1),
+          ),
         );
       } else if (selectedValue == 'delete') {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -260,14 +321,21 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text(
+          'Settings',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
               'Network Target',
-              style: TextStyle(fontSize: 12, color: Colors.tealAccent, fontWeight: FontWeight.bold),
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.tealAccent,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             const SizedBox(height: 8),
             TextField(
@@ -293,7 +361,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 _initializeWebSocket();
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Reconnecting secure pipe to: $_serverIp')),
+                  SnackBar(
+                    content: Text('Reconnecting secure pipe to: $_serverIp'),
+                  ),
                 );
               }
             },
@@ -311,9 +381,15 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           height: 73,
           child: Center(
             child: ListTile(
-              title: const Text('Morse Messenger', style: TextStyle(fontWeight: FontWeight.bold)),
+              title: const Text(
+                'Morse Messenger',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               trailing: IconButton(
-                icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent),
+                icon: const Icon(
+                  Icons.add_circle_outline,
+                  color: Colors.tealAccent,
+                ),
                 onPressed: () => Dialogs.showAddPeer(
                   context: context,
                   nameController: _nameController,
@@ -390,7 +466,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           IconButton(
             style: IconButton.styleFrom(
               side: const BorderSide(color: Colors.white10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
             icon: const Icon(Icons.settings, color: Colors.white70, size: 18),
             onPressed: _showSettingsDialog,
@@ -412,7 +490,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               child: Center(
                 child: IconButton(
                   icon: const Icon(Icons.menu, color: Colors.tealAccent),
-                  onPressed: () => setState(() => _isMobileSidebarExpanded = true),
+                  onPressed: () =>
+                      setState(() => _isMobileSidebarExpanded = true),
                 ),
               ),
             ),
@@ -420,7 +499,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.symmetric(vertical: 10.0),
-                children: _peers.map((p) => _buildMobileAvatarButton(p)).toList(),
+                children: _peers
+                    .map((p) => _buildMobileAvatarButton(p))
+                    .toList(),
               ),
             ),
             const Divider(color: Colors.white10, height: 1),
@@ -444,10 +525,14 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         },
         child: CircleAvatar(
           radius: 20,
-          backgroundColor: _selectedPeer == p ? Colors.tealAccent : Colors.white10,
+          backgroundColor: _selectedPeer == p
+              ? Colors.tealAccent
+              : Colors.white10,
           child: Text(
             p.nickname[0].toUpperCase(),
-            style: TextStyle(color: _selectedPeer == p ? Colors.black : Colors.tealAccent),
+            style: TextStyle(
+              color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
+            ),
           ),
         ),
       ),
@@ -482,7 +567,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     if (_selectedPeer == null) {
       return const Expanded(
         child: Center(
-          child: Text('No Active Secure Selection', style: TextStyle(color: Colors.white30)),
+          child: Text(
+            'No Active Secure Selection',
+            style: TextStyle(color: Colors.white30),
+          ),
         ),
       );
     }
@@ -509,7 +597,10 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         child: ListTile(
           title: Text(
             _selectedPeer!.nickname,
-            style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold),
+            style: const TextStyle(
+              color: Colors.tealAccent,
+              fontWeight: FontWeight.bold,
+            ),
           ),
           subtitle: Text(
             'Target: ${_selectedPeer!.shortId}',
@@ -524,7 +615,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     return Expanded(
       child: NotificationListener<ScrollNotification>(
         onNotification: (scrollInfo) {
-          final isAtBottom = scrollInfo.metrics.pixels >= (scrollInfo.metrics.maxScrollExtent - 10);
+          final isAtBottom =
+              scrollInfo.metrics.pixels >=
+              (scrollInfo.metrics.maxScrollExtent - 10);
           if (isAtBottom && !_autoScroll) {
             _autoScroll = true;
           } else if (!isAtBottom && _autoScroll) {
@@ -535,20 +628,25 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
         child: ListView(
           controller: _scrollController,
           padding: const EdgeInsets.all(24),
-          children: _selectedPeer!.messages.map((m) => _buildMessageBubble(m)).toList(),
+          children: _selectedPeer!.messages
+              .map((m) => _buildMessageBubble(m))
+              .toList(),
         ),
       ),
     );
   }
 
   Widget _buildMessageBubble(ChatMessage m) {
-    final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
+    final String timeString =
+        "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
     TapDownDetails? tapDetails;
 
     return Align(
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: Column(
-        crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: m.isMe
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         children: [
           GestureDetector(
             onTapDown: (details) => tapDetails = details,
@@ -565,9 +663,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               margin: const EdgeInsets.symmetric(vertical: 4),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E),
+                color: m.isMe
+                    ? const Color(0xFF0B0B0B)
+                    : const Color(0xFF1E1E1E),
                 borderRadius: BorderRadius.circular(12),
-                border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null,
+                border: m.isMe
+                    ? Border.all(color: Colors.white10, width: 0.5)
+                    : null,
               ),
               child: Text(m.text),
             ),
@@ -592,6 +694,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           Expanded(
             child: TextField(
               controller: _msgController,
+              focusNode: _msgFocusNode,
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => _sendMessage(),
               decoration: const InputDecoration(
@@ -625,7 +728,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
             onTap: () => setState(() => _isMobileSidebarExpanded = false),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              color: _isMobileSidebarExpanded ? Colors.black54 : Colors.transparent,
+              color: _isMobileSidebarExpanded
+                  ? Colors.black54
+                  : Colors.transparent,
             ),
           ),
         ),
