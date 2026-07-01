@@ -6,6 +6,7 @@ import 'package:crypton/crypton.dart';
 import 'models.dart';
 import 'dialogs.dart';
 import 'storage_service.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -978,7 +979,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                     ? Border.all(color: Colors.white10, width: 0.5)
                     : null,
               ),
-              child: Text(m.text),
+              child: MarkdownBody(
+                data: m.text,
+                selectable: false,
+                styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                  p: const TextStyle(color: Colors.white, fontSize: 14),
+                  code: const TextStyle(
+                    backgroundColor: Colors.black26,
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    color: Colors.tealAccent,
+                  ),
+                  codeblockDecoration: BoxDecoration(
+                    color: Colors.black38,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.white10, width: 0.5),
+                  ),
+                  a: const TextStyle(color: Colors.tealAccent, decoration: TextDecoration.underline),
+                  listBullet: const TextStyle(color: Colors.tealAccent),
+                ),
+              ),
             ),
           ),
           Padding(
