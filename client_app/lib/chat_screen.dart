@@ -354,7 +354,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
       NotificationService.showNotification(
         id: DateTime.now().millisecondsSinceEpoch ~/ 1000, // Safe unique ID
         title: "Message Request from Unknown Peer",
-        body: "From Short-ID: ${senderPublicKey.substring(senderPublicKey.length - 15)}",
+        body:
+            "From Short-ID: ${senderPublicKey.substring(senderPublicKey.length - 15)}",
       );
     }
   }
@@ -560,11 +561,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           _serverIp = targetIp;
         });
         _initializeWebSocket();
-        
+
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Reconnecting secure pipe to: $_serverIp'),
-          ),
+          SnackBar(content: Text('Reconnecting secure pipe to: $_serverIp')),
         );
       },
     );
@@ -572,6 +571,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
   void _resetIdentity() async {
     final kp = RSAKeypair.fromRandom();
+    await StorageService.resetIdentity();
     await StorageService.savePrivateKey(kp.privateKey.toString());
 
     setState(() {
@@ -586,11 +586,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     _initializeWebSocket();
 
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Identity cleared. New secure key pairs deployed.'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Identity cleared.')));
     }
   }
 

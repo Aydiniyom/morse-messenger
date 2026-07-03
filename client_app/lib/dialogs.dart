@@ -70,7 +70,7 @@ class Dialogs {
                       title: const Text('Are you absolutely sure?'),
                       content: const Text(
                         'This action destroys your identity permanently. '
-                        'Your old peers will no longer be able to read your incoming payloads.',
+                        'Your keys will change, and all of your chats will be deleted.',
                       ),
                       actions: [
                         TextButton(
