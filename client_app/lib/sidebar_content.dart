@@ -8,6 +8,7 @@ class SidebarContent extends StatelessWidget {
   final VoidCallback onAddPeerPressed;
   final VoidCallback onIdentityPressed;
   final VoidCallback onSettingsPressed;
+  final VoidCallback onAboutPressed;
   final Function(ChatPeer) onSelectPeer;
 
   const SidebarContent({
@@ -18,6 +19,7 @@ class SidebarContent extends StatelessWidget {
     required this.onAddPeerPressed,
     required this.onIdentityPressed,
     required this.onSettingsPressed,
+    required this.onAboutPressed,
     required this.onSelectPeer,
   });
 
@@ -37,7 +39,16 @@ class SidebarContent extends StatelessWidget {
                 ),
               ),
               trailing: IconButton(
-                icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent),
+                icon: const Icon(
+                  Icons.add,
+                  color: Colors.tealAccent,
+                ),
+                style: IconButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadiusGeometry.circular(10),
+                    side: BorderSide(color: Colors.white10)
+                  ),
+                ),
                 onPressed: onAddPeerPressed,
               ),
             ),
@@ -69,7 +80,9 @@ class SidebarContent extends StatelessWidget {
             backgroundColor: isSelected ? Colors.tealAccent : Colors.white10,
             child: Text(
               p.nickname[0].toUpperCase(),
-              style: TextStyle(color: isSelected ? Colors.black : Colors.tealAccent),
+              style: TextStyle(
+                color: isSelected ? Colors.black : Colors.tealAccent,
+              ),
             ),
           ),
           Positioned(
@@ -104,18 +117,23 @@ class SidebarContent extends StatelessWidget {
                 side: const BorderSide(color: Colors.white10),
               ),
               icon: const Icon(Icons.vpn_key, size: 14),
-              label: const Text('Identity', style: TextStyle(fontSize: 11)),
+              label: const Text('Identity', style: TextStyle(fontSize: 14)),
               onPressed: onIdentityPressed,
             ),
           ),
           const SizedBox(width: 8),
           IconButton(
-            style: IconButton.styleFrom(
-              side: const BorderSide(color: Colors.white10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
             icon: const Icon(Icons.settings, color: Colors.white70, size: 18),
             onPressed: onSettingsPressed,
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(
+              Icons.info_rounded,
+              color: Colors.white70,
+              size: 18,
+            ),
+            onPressed: onAboutPressed,
           ),
         ],
       ),

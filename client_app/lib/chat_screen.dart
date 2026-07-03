@@ -745,6 +745,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 onlinePeers: _onlinePeers,
                 onSelectPeer: _selectAndLoadPeer,
                 onSettingsPressed: _showSettingsDialog,
+                onAboutPressed: () => Dialogs.showAboutDialog(context: context,),
                 onIdentityPressed: () => Dialogs.showIdentityModal(
                   context: context,
                   shortId: _myShortId,
@@ -803,6 +804,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                           onlinePeers: _onlinePeers,
                           onSelectPeer: _selectAndLoadPeer,
                           onSettingsPressed: _showSettingsDialog,
+                          onAboutPressed: () => Dialogs.showAboutDialog(context: context,),
                           onIdentityPressed: () => Dialogs.showIdentityModal(
                             context: context,
                             shortId: _myShortId,

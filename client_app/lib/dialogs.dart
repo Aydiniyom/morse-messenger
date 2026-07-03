@@ -19,6 +19,7 @@ class Dialogs {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // NETWORK TARGET
             const Text(
               'Network Target',
               style: TextStyle(
@@ -35,9 +36,12 @@ class Dialogs {
                 labelText: "Server Address",
               ),
             ),
+
             const SizedBox(height: 12),
             const Divider(color: Colors.white10),
             const SizedBox(height: 12),
+
+            // DANGER ZONE
             const Text(
               'Danger Zone',
               style: TextStyle(
@@ -111,6 +115,61 @@ class Dialogs {
               }
             },
             child: const Text('Save & Connect'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static void showAboutDialog({required BuildContext context}) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          'About',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Developer: github.com/aydiniyom',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.tealAccent,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(width: 8,),
+                IconButton.outlined(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.tealAccent,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    side: const BorderSide(color: Colors.white10),
+                    backgroundColor: const Color(0xFF1A1A1A),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                  ),
+                  onPressed: () {
+                    Clipboard.setData(
+                      ClipboardData(text: "https://github.com/aydiniyom"),
+                    );
+                  },
+                  icon: const Icon(Icons.paste, size: 16),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Okay'),
           ),
         ],
       ),
@@ -288,7 +347,7 @@ class Dialogs {
                 const SizedBox(width: 8),
                 SizedBox(
                   height: 48,
-                  child: OutlinedButton.icon(
+                  child: IconButton.outlined(
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.tealAccent,
                       shape: RoundedRectangleBorder(
@@ -299,17 +358,18 @@ class Dialogs {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                     ),
                     onPressed: () async {
-                      final data = await Clipboard.getData(Clipboard.kTextPlain);
+                      final data = await Clipboard.getData(
+                        Clipboard.kTextPlain,
+                      );
                       if (data != null && data.text != null) {
                         keyInputController.text = data.text!;
                       }
                     },
-                    label: const Text("Paste"),
                     icon: const Icon(Icons.paste, size: 16),
                   ),
                 ),
               ],
-            )
+            ),
           ],
         ),
         actions: [
