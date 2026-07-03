@@ -16,6 +16,8 @@ class StorageService {
   static const _keyName = 'dec_chat_private_key';
   static const _serverIpKey = 'saved_websocket_server_ip';
   static const _peerListKey = 'saved_chat_peers_list';
+  static const String savedMessagesPeerKey = '__SYSTEM_SAVED_MESSAGES__';
+  static const String _savedMessagesDataKey = 'persistent_saved_messages_json';
 
   static Future<void> initDatabase() async {
     await Hive.initFlutter('morse-messenger');
@@ -201,6 +203,50 @@ class StorageService {
       debugPrint("Identity and history boxes cleared successfully. Server IP preserved.");
     } catch (e) {
       debugPrint("Error performing identity reset: $e");
+    }
+  }
+
+  // --- PERSISTENT SAVED MESSAGES STORAGE PATHS ---
+  static Future<void> forwardToSavedMessages({
+    required String msgId,
+    required String encryptedPayload,
+    required String timestampIso,
+  }) async {
+    try {
+      final box = _getSettingsBox();
+      final String rawJsonString = box.get(_savedMessagesDataKey, defaultValue: "[]");
+      final List<dynamic> decodedList = jsonDecode(rawJsonString);
+
+      List<Map<String, dynamic>> savedHistory = List<Map<String, dynamic>>.from(
+        decodedList.map((item) => Map<String, dynamic>.from(item as Map)),
+      );
+
+      savedHistory.add({
+        "id": msgId,
+        "isMe": true, // Always rendered uniformly on one side
+        "payload": encryptedPayload,
+        "timestamp": timestampIso,
+        // Notice: 'isRead' field removed completely per instructions
+      });
+
+      await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));
+    } catch (e) {
+      debugPrint("Failed to write to local storage: $e");
+    }
+  }
+
+  static List<Map<String, dynamic>> fetchSavedMessages() {
+    try {
+      final box = _getSettingsBox();
+      final String rawJsonString = box.get(_savedMessagesDataKey, defaultValue: "[]");
+      final List<dynamic> decodedList = jsonDecode(rawJsonString);
+
+      return List<Map<String, dynamic>>.from(
+        decodedList.map((item) => Map<String, dynamic>.from(item as Map)),
+      );
+    } catch (e) {
+      debugPrint("Failed to read local saved messages: $e");
+      return [];
     }
   }
 }

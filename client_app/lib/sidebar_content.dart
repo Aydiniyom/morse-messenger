@@ -1,4 +1,5 @@
 import 'package:client_app/rounded_divider.dart';
+import 'package:client_app/storage_service.dart';
 import 'package:flutter/material.dart';
 import 'models.dart';
 
@@ -40,14 +41,11 @@ class SidebarContent extends StatelessWidget {
                 ),
               ),
               trailing: IconButton(
-                icon: const Icon(
-                  Icons.add,
-                  color: Colors.tealAccent,
-                ),
+                icon: const Icon(Icons.add, color: Colors.tealAccent),
                 style: IconButton.styleFrom(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadiusGeometry.circular(10),
-                    side: BorderSide(color: Colors.white10)
+                    side: BorderSide(color: Colors.white10),
                   ),
                 ),
                 onPressed: onAddPeerPressed,
@@ -56,16 +54,42 @@ class SidebarContent extends StatelessWidget {
           ),
         ),
         const RoundedDivider(),
-        SizedBox(height: 3,),
+        SizedBox(height: 3),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.symmetric(vertical: 10.0),
-            children: peers.map((p) => _buildPeerListTile(p)).toList(),
+            children: [
+              _buildSavedMessagesTile(),
+              ...peers.map((p) => _buildPeerListTile(p)).toList(),
+            ],
           ),
         ),
         const RoundedDivider(),
         _buildSidebarFooterActions(),
       ],
+    );
+  }
+
+  Widget _buildSavedMessagesTile() {
+    final bool isSelected =
+        selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+
+    return ListTile(
+      selected: isSelected,
+      selectedTileColor: Colors.white10,
+      leading: CircleAvatar(
+        backgroundColor: isSelected ? Colors.tealAccent : Colors.white10,
+        child: Icon(
+          Icons.bookmark_border_outlined,
+          color: isSelected ? Colors.black : Colors.tealAccent,
+        ),
+      ),
+      title: Text('Saved Messages'),
+      onTap: () {
+        onSelectPeer(
+          ChatPeer(StorageService.savedMessagesPeerKey, 'Saved Messages'),
+        );
+      },
     );
   }
 
