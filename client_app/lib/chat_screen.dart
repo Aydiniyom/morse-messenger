@@ -549,119 +549,24 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   }
 
   void _showSettingsDialog() {
-    showDialog(
+    Dialogs.showSettingsDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text(
-          'Settings',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Network Target',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.tealAccent,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _ipController,
-              decoration: const InputDecoration(
-                hintText: "e.g. 192.168.1.50:8080",
-                labelText: "Server Address",
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Divider(color: Colors.white10),
-            const SizedBox(height: 12),
-            const Text(
-              'Danger Zone',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.redAccent,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.redAccent,
-                  side: const BorderSide(color: Colors.redAccent, width: 0.5),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
-                icon: const Icon(Icons.refresh_rounded, size: 16),
-                label: const Text(
-                  'Reset Identity',
-                  style: TextStyle(fontSize: 13),
-                ),
-                onPressed: () {
-                  Navigator.pop(ctx);
-
-                  showDialog(
-                    context: context,
-                    builder: (confirmCtx) => AlertDialog(
-                      title: const Text('Are you absolutely sure?'),
-                      content: const Text(
-                        'This actions destroys your identity permanently. '
-                        'Your old peers will no longer be able to read your incoming payloads.',
-                      ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(confirmCtx),
-                          child: const Text('Cancel'),
-                        ),
-                        ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.redAccent,
-                          ),
-                          onPressed: () {
-                            Navigator.pop(confirmCtx);
-                            _resetIdentity();
-                          },
-                          child: const Text(
-                            'Wipe & Re-key',
-                            style: TextStyle(color: Colors.white),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
+      ipController: _ipController,
+      onResetIdentity: () {
+        _resetIdentity();
+      },
+      onSaveAndConnect: (targetIp) {
+        setState(() {
+          _serverIp = targetIp;
+        });
+        _initializeWebSocket();
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reconnecting secure pipe to: $_serverIp'),
           ),
-          ElevatedButton(
-            onPressed: () {
-              if (_ipController.text.isNotEmpty) {
-                setState(() {
-                  _serverIp = _ipController.text.trim();
-                });
-                _initializeWebSocket();
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Reconnecting secure pipe to: $_serverIp'),
-                  ),
-                );
-              }
-            },
-            child: const Text('Save & Connect'),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 

@@ -2,12 +2,127 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 class Dialogs {
+  static void showSettingsDialog({
+    required BuildContext context,
+    required TextEditingController ipController,
+    required VoidCallback onResetIdentity,
+    required Function(String targetIp) onSaveAndConnect,
+  }) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          'Settings',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Network Target',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.tealAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ipController,
+              decoration: const InputDecoration(
+                hintText: "e.g. 192.168.1.50:8080",
+                labelText: "Server Address",
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Divider(color: Colors.white10),
+            const SizedBox(height: 12),
+            const Text(
+              'Danger Zone',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.redAccent,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent, width: 0.5),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
+                icon: const Icon(Icons.refresh_rounded, size: 16),
+                label: const Text(
+                  'Reset Identity',
+                  style: TextStyle(fontSize: 13),
+                ),
+                onPressed: () {
+                  // Dismiss settings window before drawing alert box
+                  Navigator.pop(ctx);
+
+                  showDialog(
+                    context: context,
+                    builder: (confirmCtx) => AlertDialog(
+                      title: const Text('Are you absolutely sure?'),
+                      content: const Text(
+                        'This action destroys your identity permanently. '
+                        'Your old peers will no longer be able to read your incoming payloads.',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(confirmCtx),
+                          child: const Text('Cancel'),
+                        ),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.redAccent,
+                          ),
+                          onPressed: () {
+                            Navigator.pop(confirmCtx);
+                            onResetIdentity(); // Trigger parental screen wipe routine
+                          },
+                          child: const Text(
+                            'Wipe & Re-key',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (ipController.text.isNotEmpty) {
+                Navigator.pop(ctx);
+                onSaveAndConnect(ipController.text.trim());
+              }
+            },
+            child: const Text('Save & Connect'),
+          ),
+        ],
+      ),
+    );
+  }
+
   static void showUnknownPeerDialog({
     required BuildContext context,
     required String senderPublicKey,
     required String initialMessage,
     required String msgId,
-    required arrivalTime,
+    required dynamic arrivalTime,
     required Function(String nickname, String msgId, DateTime time) onAccept,
   }) {
     final TextEditingController incomingNameController =
@@ -167,7 +282,6 @@ class Dialogs {
                     controller: keyInputController,
                     decoration: const InputDecoration(
                       hintText: "Identity key...",
-                      // Implicitly uses your global 12px rounded theme
                     ),
                   ),
                 ),
