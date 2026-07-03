@@ -12,7 +12,8 @@ import 'models.dart';
 import 'dialogs.dart';
 import 'storage_service.dart';
 import 'connection_setup_screen.dart';
-import 'sidebar_content.dart';
+import 'expanded_sidebar.dart';
+import 'compact_sidebar.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -602,85 +603,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     _initializeWebSocket();
   }
 
-  // --- SUB-WIDGET COMPONENT BUILDERS ---
-  Widget _buildMobileCompactSidebar() {
-    return Container(
-      width: 68,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.only(
-          topRight: Radius.circular(16),
-          bottomRight: Radius.circular(16),
-        ),
-        color: const Color(0xFF1A1A1A),
-      ),
-      child: SafeArea(
-        child: Column(
-          children: [
-            SizedBox(
-              height: 73,
-              child: Center(
-                child: IconButton(
-                  icon: const Icon(Icons.menu, color: Colors.tealAccent),
-                  onPressed: () =>
-                      setState(() => _isMobileSidebarExpanded = true),
-                ),
-              ),
-            ),
-            const RoundedDivider(),
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(vertical: 10.0),
-                children: _peers
-                    .map((p) => _buildMobileAvatarButton(p))
-                    .toList(),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMobileAvatarButton(ChatPeer p) {
-    final bool isOnline = _onlinePeers.contains(p.rawPublicKey.trim());
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: GestureDetector(
-        onTap: () => _selectAndLoadPeer(p),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            CircleAvatar(
-              radius: 20,
-              backgroundColor: _selectedPeer == p
-                  ? Colors.tealAccent
-                  : Colors.white10,
-              child: Text(
-                p.nickname[0].toUpperCase(),
-                style: TextStyle(
-                  color: _selectedPeer == p ? Colors.black : Colors.tealAccent,
-                ),
-              ),
-            ),
-            Positioned(
-              right: 14,
-              bottom: 2,
-              child: Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(
-                  color: isOnline ? Colors.greenAccent : Colors.blueGrey,
-                  shape: BoxShape.circle,
-                  border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildMainContentSection() {
     final bool isSavedMessagesChat =
         _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
@@ -905,7 +827,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 ),
                 color: const Color(0xFF1A1A1A),
               ),
-              child: SidebarContent(
+              child: ExpandedSidebar(
                 peers: _peers,
                 selectedPeer: _selectedPeer,
                 onlinePeers: _onlinePeers,
@@ -970,7 +892,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                         color: const Color(0xFF1A1A1A),
                       ),
                       child: SafeArea(
-                        child: SidebarContent(
+                        child: ExpandedSidebar(
                           peers: _peers,
                           selectedPeer: _selectedPeer,
                           onlinePeers: _onlinePeers,
@@ -993,7 +915,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                       ),
                     )
                   else
-                    _buildMobileCompactSidebar(),
+                    CompactSidebar(
+                      peers: _peers,
+                      selectedPeer: _selectedPeer,
+                      onlinePeers: _onlinePeers,
+                      onSelectPeer: _selectAndLoadPeer,
+                      onMenuPressed: () => setState(() => _isMobileSidebarExpanded = true),
+                    ),
                   _buildMainContentSection(),
                 ],
               ),

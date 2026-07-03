@@ -3,7 +3,7 @@ import 'package:client_app/storage_service.dart';
 import 'package:flutter/material.dart';
 import 'models.dart';
 
-class SidebarContent extends StatelessWidget {
+class ExpandedSidebar extends StatelessWidget {
   final List<ChatPeer> peers;
   final ChatPeer? selectedPeer;
   final Set<String> onlinePeers;
@@ -13,7 +13,7 @@ class SidebarContent extends StatelessWidget {
   final VoidCallback onAboutPressed;
   final Function(ChatPeer) onSelectPeer;
 
-  const SidebarContent({
+  const ExpandedSidebar({
     super.key,
     required this.peers,
     required this.selectedPeer,
