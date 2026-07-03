@@ -1,3 +1,4 @@
+import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -28,9 +29,9 @@ class Dialogs {
               ),
             ),
 
-            const SizedBox(height: 12),
-            const Divider(color: Colors.white10),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
+            const RoundedDivider(),
+            const SizedBox(height: 16),
 
             // DANGER ZONE
             const Text(
@@ -124,33 +125,73 @@ class Dialogs {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            const Text("Version: dev"),
+            const SizedBox(height: 8,),
             Row(
               children: [
-                Text(
+                const Text(
                   'Developer:',
                 ),
-                SizedBox(width: 8,),
-                OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.tealAccent,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                const SizedBox(width: 8,),
+                SizedBox(
+                  height: 30,
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.tealAccent,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      side: const BorderSide(color: Colors.white10),
+                      backgroundColor: const Color(0xFF1A1A1A),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
                     ),
-                    side: const BorderSide(color: Colors.white10),
-                    backgroundColor: const Color(0xFF1A1A1A),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    onPressed: () {
+                      Clipboard.setData(
+                        ClipboardData(text: "https://github.com/aydiniyom"),
+                      );
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Copied GitHub link!')),
+                      );
+                    },
+                    label: const Text('@aydiniyom'),
+                    icon: const Icon(Icons.link, size: 16),
                   ),
-                  onPressed: () {
-                    Clipboard.setData(
-                      ClipboardData(text: "https://github.com/aydiniyom"),
-                    );
-                  },
-                  label: const Text('@aydiniyom'),
-                  icon: const Icon(Icons.paste, size: 16),
+                )
+              ],
+            ),
+            const SizedBox(height: 8,),
+            Row(
+              children: [
+                const Text(
+                  'App Repo:',
+                ),
+                const SizedBox(width: 8,),
+                SizedBox(
+                  height: 30,
+                  child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.tealAccent,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      side: const BorderSide(color: Colors.white10),
+                      backgroundColor: const Color(0xFF1A1A1A),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                    ),
+                    onPressed: () {
+                      Clipboard.setData(
+                        ClipboardData(text: "https://github.com/aydiniyom/morse-messenger"),
+                      );
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Copied GitHub link!')),
+                      );
+                    },
+                    label: const Text('morse-messenger'),
+                    icon: const Icon(Icons.link, size: 16),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
           ],
         ),
         actions: [
