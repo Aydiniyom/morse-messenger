@@ -1,0 +1,124 @@
+import 'package:flutter/material.dart';
+import 'models.dart';
+
+class SidebarContent extends StatelessWidget {
+  final List<ChatPeer> peers;
+  final ChatPeer? selectedPeer;
+  final Set<String> onlinePeers;
+  final VoidCallback onAddPeerPressed;
+  final VoidCallback onIdentityPressed;
+  final VoidCallback onSettingsPressed;
+  final Function(ChatPeer) onSelectPeer;
+
+  const SidebarContent({
+    super.key,
+    required this.peers,
+    required this.selectedPeer,
+    required this.onlinePeers,
+    required this.onAddPeerPressed,
+    required this.onIdentityPressed,
+    required this.onSettingsPressed,
+    required this.onSelectPeer,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        SizedBox(
+          height: 73,
+          child: Center(
+            child: ListTile(
+              title: const Text(
+                'Morse Messenger',
+                style: TextStyle(
+                  fontWeight: FontWeight.w400,
+                  fontFamily: "monospace",
+                ),
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.add_circle_outline, color: Colors.tealAccent),
+                onPressed: onAddPeerPressed,
+              ),
+            ),
+          ),
+        ),
+        const Divider(color: Colors.white10, height: 1),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 10.0),
+            children: peers.map((p) => _buildPeerListTile(p)).toList(),
+          ),
+        ),
+        const Divider(color: Colors.white10, height: 1),
+        _buildSidebarFooterActions(),
+      ],
+    );
+  }
+
+  Widget _buildPeerListTile(ChatPeer p) {
+    final bool isOnline = onlinePeers.contains(p.rawPublicKey.trim());
+    final bool isSelected = selectedPeer == p;
+
+    return ListTile(
+      selected: isSelected,
+      selectedTileColor: Colors.white10,
+      leading: Stack(
+        children: [
+          CircleAvatar(
+            backgroundColor: isSelected ? Colors.tealAccent : Colors.white10,
+            child: Text(
+              p.nickname[0].toUpperCase(),
+              style: TextStyle(color: isSelected ? Colors.black : Colors.tealAccent),
+            ),
+          ),
+          Positioned(
+            right: 0,
+            bottom: 0,
+            child: Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(
+                color: isOnline ? Colors.greenAccent : Colors.blueGrey,
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+              ),
+            ),
+          ),
+        ],
+      ),
+      title: Text(p.nickname),
+      onTap: () => onSelectPeer(p),
+    );
+  }
+
+  Widget _buildSidebarFooterActions() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+      child: Row(
+        children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.tealAccent,
+                side: const BorderSide(color: Colors.white10),
+              ),
+              icon: const Icon(Icons.vpn_key, size: 14),
+              label: const Text('Identity', style: TextStyle(fontSize: 11)),
+              onPressed: onIdentityPressed,
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            style: IconButton.styleFrom(
+              side: const BorderSide(color: Colors.white10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            icon: const Icon(Icons.settings, color: Colors.white70, size: 18),
+            onPressed: onSettingsPressed,
+          ),
+        ],
+      ),
+    );
+  }
+}
