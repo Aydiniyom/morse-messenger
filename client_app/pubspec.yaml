@@ -44,7 +44,6 @@ dependencies:
   encrypt: ^5.0.3
   local_notifier: ^0.1.6
   flutter_local_notifications: ^22.0.1
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
