@@ -20,15 +20,6 @@ class Dialogs {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // NETWORK TARGET
-            const Text(
-              'Network Target',
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.tealAccent,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
             TextField(
               controller: ipController,
               decoration: const InputDecoration(
@@ -114,7 +105,7 @@ class Dialogs {
                 onSaveAndConnect(ipController.text.trim());
               }
             },
-            child: const Text('Save & Connect'),
+            child: const Text('Save'),
           ),
         ],
       ),
@@ -136,15 +127,10 @@ class Dialogs {
             Row(
               children: [
                 Text(
-                  'Developer: github.com/aydiniyom',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.tealAccent,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  'Developer:',
                 ),
                 SizedBox(width: 8,),
-                IconButton.outlined(
+                OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.tealAccent,
                     shape: RoundedRectangleBorder(
@@ -159,6 +145,7 @@ class Dialogs {
                       ClipboardData(text: "https://github.com/aydiniyom"),
                     );
                   },
+                  label: const Text('@aydiniyom'),
                   icon: const Icon(Icons.paste, size: 16),
                 ),
               ],
