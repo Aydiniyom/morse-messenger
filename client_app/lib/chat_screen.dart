@@ -22,9 +22,11 @@ class DecentralizedChat extends StatefulWidget {
   State<DecentralizedChat> createState() => _DecentralizedChatState();
 }
 
-class _DecentralizedChatState extends State<DecentralizedChat> {
+class _DecentralizedChatState extends State<DecentralizedChat>
+    with WidgetsBindingObserver {
   bool _isConnecting = false;
   bool _isServerConnected = false;
+  bool _isWindowInFocus = true;
 
   final _msgController = TextEditingController();
   final _keyInputController = TextEditingController();
@@ -50,6 +52,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _ipController.text = _serverIp;
     _loadOrCreateIdentity();
 
@@ -65,6 +68,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _msgFocusNode.dispose();
     _scrollController.dispose();
     _msgController.dispose();
@@ -72,6 +76,17 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
     _nameController.dispose();
     _ipController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    setState(() {
+      _isWindowInFocus = state == AppLifecycleState.resumed;
+    });
+
+    if (_isWindowInFocus && _selectedPeer != null) {
+      _checkAndSendPendingReceipts();
+    }
   }
 
   // --- IDENTITY & NETWORKING PIPES ---
@@ -282,6 +297,28 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           (p) => p.rawPublicKey.trim() == senderPublicKey,
         );
         if (!sender.messages.any((m) => m.id == msgId)) {
+          final newIncomingMsg = ChatMessage(
+            messageText,
+            false,
+            customTime: sentTime,
+            customId: msgId,
+          );
+
+          final bool isChatOpenAndVisible =
+              _selectedPeer == sender && _isWindowInFocus && _autoScroll;
+
+          if (isChatOpenAndVisible) {
+            newIncomingMsg.isRead = true;
+            _sendReadReceipt(senderPublicKey, msgId);
+          } else {
+            newIncomingMsg.isRead = false;
+            NotificationService.showNotification(
+              id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              title: "New Message from ${sender.nickname}",
+              body: messageText,
+            );
+          }
+
           sender.messages.add(
             ChatMessage(
               messageText,
@@ -289,15 +326,6 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               customTime: sentTime,
               customId: msgId,
             ),
-          );
-        }
-        if (_selectedPeer == sender) {
-          _sendReadReceipt(senderPublicKey, msgId);
-        } else {
-          NotificationService.showNotification(
-            id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-            title: "New Message from ${sender.nickname}",
-            body: messageText,
           );
         }
       });
@@ -329,6 +357,26 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           _scrollToBottom();
         },
       );
+    }
+  }
+
+  void _checkAndSendPendingReceipts() {
+    if (_selectedPeer == null || !_isWindowInFocus || !_autoScroll) return;
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey)
+      return;
+
+    bool stateChanged = false;
+
+    for (var m in _selectedPeer!.messages) {
+      if (!m.isMe && !m.isRead) {
+        _sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
+        m.isRead = true;
+        stateChanged = true;
+      }
+    }
+
+    if (stateChanged) {
+      setState(() {});
     }
   }
 
@@ -635,7 +683,9 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                     ),
                   ),
                   subtitle: Text(
-                    isSavedMessagesChat ? 'Save messages here via the right-click / hold menu.' : 'Target: ${_selectedPeer!.shortId}',
+                    isSavedMessagesChat
+                        ? 'Save messages here via the right-click / hold menu.'
+                        : 'Target: ${_selectedPeer!.shortId}',
                     style: const TextStyle(
                       fontSize: 11,
                       fontFamily: 'monospace',
@@ -654,6 +704,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                       (scrollInfo.metrics.maxScrollExtent - 10);
                   if (isAtBottom && !_autoScroll) {
                     _autoScroll = true;
+                    _checkAndSendPendingReceipts();
                   } else if (!isAtBottom && _autoScroll) {
                     _autoScroll = false;
                   }
@@ -920,7 +971,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                       selectedPeer: _selectedPeer,
                       onlinePeers: _onlinePeers,
                       onSelectPeer: _selectAndLoadPeer,
-                      onMenuPressed: () => setState(() => _isMobileSidebarExpanded = true),
+                      onMenuPressed: () =>
+                          setState(() => _isMobileSidebarExpanded = true),
                     ),
                   _buildMainContentSection(),
                 ],
