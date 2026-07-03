@@ -1,3 +1,4 @@
+import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
 import 'models.dart';
 
@@ -54,14 +55,15 @@ class SidebarContent extends StatelessWidget {
             ),
           ),
         ),
-        const Divider(color: Colors.white10, height: 1),
+        const RoundedDivider(),
+        SizedBox(height: 3,),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.symmetric(vertical: 10.0),
             children: peers.map((p) => _buildPeerListTile(p)).toList(),
           ),
         ),
-        const Divider(color: Colors.white10, height: 1),
+        const RoundedDivider(),
         _buildSidebarFooterActions(),
       ],
     );

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:client_app/notification_service.dart';
+import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -508,7 +509,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
   Widget _buildMobileCompactSidebar() {
     return Container(
       width: 68,
-      color: const Color(0xFF1A1A1A),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.only(
+          topRight: Radius.circular(16),
+          bottomRight: Radius.circular(16),
+        ),
+        color: const Color(0xFF1A1A1A),
+      ),
       child: SafeArea(
         child: Column(
           children: [
@@ -521,7 +528,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 ),
               ),
             ),
-            const Divider(color: Colors.white10, height: 1),
+            const RoundedDivider(),
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.symmetric(vertical: 10.0),
@@ -591,7 +598,8 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                 ),
               ),
             ),
-            const Divider(height: 1, color: Colors.white10),
+            const RoundedDivider(),
+            SizedBox(height: 5,),
             Expanded(
               child: NotificationListener<ScrollNotification>(
                 onNotification: (scrollInfo) {
@@ -694,7 +702,7 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => _sendMessage(),
               decoration: const InputDecoration(
-                hintText: 'Type your message...',
+                hintText: 'Message...',
                 filled: true,
                 fillColor: Color(0xFF1E1E1E),
                 border: OutlineInputBorder(
@@ -738,7 +746,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
           child: SafeArea(
             child: Container(
               width: 260,
-              color: const Color(0xFF1A1A1A),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.only(
+                  topRight: Radius.circular(16),
+                  bottomRight: Radius.circular(16),
+                ),
+                color: const Color(0xFF1A1A1A),
+              ),
               child: SidebarContent(
                 peers: _peers,
                 selectedPeer: _selectedPeer,
@@ -796,7 +810,13 @@ class _DecentralizedChatState extends State<DecentralizedChat> {
                   if (!isSmallScreen)
                     Container(
                       width: 260,
-                      color: const Color(0xFF1A1A1A),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.only(
+                          topRight: Radius.circular(16),
+                          bottomRight: Radius.circular(16),
+                        ),
+                        color: const Color(0xFF1A1A1A),
+                      ),
                       child: SafeArea(
                         child: SidebarContent(
                           peers: _peers,
