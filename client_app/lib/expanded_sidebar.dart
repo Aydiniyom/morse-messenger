@@ -126,7 +126,13 @@ class ExpandedSidebar extends StatelessWidget {
           ),
         ],
       ),
-      title: Text(p.nickname),
+      title: Text(p.isPending
+          ? '${p.nickname} (pending)'
+          : p.nickname,
+        style: TextStyle(
+          fontStyle: p.isPending ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
       onTap: () => onSelectPeer(p),
     );
   }

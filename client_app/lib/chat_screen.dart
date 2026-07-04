@@ -163,7 +163,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     final savedPeers = await StorageService.fetchPeerList();
     final List<ChatPeer> hydratedPeers = savedPeers.map((data) {
-      return ChatPeer(rawPublicKey: data['publicKey']!, nickname: data['nickname']!);
+      return ChatPeer(
+        rawPublicKey: data['publicKey']!,
+        nickname: data['nickname']!,
+      );
     }).toList();
 
     final String? savedIp = await StorageService.fetchServerIp();
@@ -255,6 +258,24 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
       if (parsedPayloadMap['isFriendRequest'] == true) {
         _processFriendRequest(senderPublicKey);
+        return;
+      }
+
+      if (parsedPayloadMap['didAcceptFRequest'] == true) {
+        setState(() {
+          final peerIndex = _peers.indexWhere(
+            (p) => p.rawPublicKey.trim() == senderPublicKey,
+          );
+
+          if (peerIndex != -1) {
+            final peer = _peers[peerIndex];
+            if (peer.isPending) {
+              peer.isPending = false;
+            }
+          }
+        });
+        _syncPeersToStorage();
+        return;
       }
 
       _processIncomingMessage(
@@ -289,12 +310,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       senderPublicKey: senderPublicKey,
       onAccept: (nickname) {
         setState(() {
-          final newPeer = ChatPeer(rawPublicKey: senderPublicKey, nickname: nickname);
+          final newPeer = ChatPeer(
+            rawPublicKey: senderPublicKey,
+            nickname: nickname,
+          );
           _peers.add(newPeer);
           _selectedPeer ??= newPeer;
         });
         _syncPeersToStorage();
         _scrollToBottom();
+
+        _sendFriendRequestReaction(senderPublicKey, true);
       },
     );
   }
@@ -304,6 +330,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     String rawCiphertext,
     Map<String, dynamic> payloadMap,
   ) async {
+    bool peerExists = _peers.any(
+      (p) => p.rawPublicKey.trim() == senderPublicKey,
+    );
+
+    if (!peerExists) return;
+
     final String messageText = payloadMap['text'];
     final String msgId = payloadMap['msgId'];
     final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
@@ -406,6 +438,21 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
+  void _sendFriendRequestReaction(String targetKey, bool didAccept) {
+    if (_channel == null) return;
+    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
+    final requestPayload = jsonEncode({"didAcceptFRequest": didAccept});
+
+    _channel!.sink.add(
+      jsonEncode({
+        "type": "message",
+        "fromUser": _myRawPublicKey,
+        "toUser": targetKey.trim(),
+        "payload": recipientPublicKeyObj.encrypt(requestPayload),
+      }),
+    );
+  }
+
   void _handleConnectNewPeer(String nickname, String key) {
     final String cleanedKey = key.trim();
     bool alreadyExists = _peers.any((p) => p.rawPublicKey.trim() == key);
@@ -416,7 +463,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       });
     } else {
       setState(() {
-        final newPeer = ChatPeer(rawPublicKey: cleanedKey, nickname: nickname, isPending: true);
+        final newPeer = ChatPeer(
+          rawPublicKey: cleanedKey,
+          nickname: nickname,
+          isPending: true,
+        );
         _peers.add(newPeer);
         _selectedPeer = newPeer;
       });
