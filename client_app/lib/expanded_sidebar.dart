@@ -87,7 +87,7 @@ class ExpandedSidebar extends StatelessWidget {
       title: Text('Saved Messages'),
       onTap: () {
         onSelectPeer(
-          ChatPeer(StorageService.savedMessagesPeerKey, 'Saved Messages'),
+          ChatPeer(rawPublicKey: StorageService.savedMessagesPeerKey, nickname: 'Saved Messages'),
         );
       },
     );

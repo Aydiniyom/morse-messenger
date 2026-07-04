@@ -75,7 +75,7 @@ class CompactSidebar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: GestureDetector(
         onTap: () => onSelectPeer(
-          ChatPeer(StorageService.savedMessagesPeerKey, 'Saved Messages'),
+          ChatPeer(rawPublicKey: StorageService.savedMessagesPeerKey, nickname: 'Saved Messages'),
         ),
         child: CircleAvatar(
           radius: 20,

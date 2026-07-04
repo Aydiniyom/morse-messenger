@@ -163,7 +163,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     final savedPeers = await StorageService.fetchPeerList();
     final List<ChatPeer> hydratedPeers = savedPeers.map((data) {
-      return ChatPeer(data['publicKey']!, data['nickname']!);
+      return ChatPeer(rawPublicKey: data['publicKey']!, nickname: data['nickname']!);
     }).toList();
 
     final String? savedIp = await StorageService.fetchServerIp();
@@ -289,7 +289,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       senderPublicKey: senderPublicKey,
       onAccept: (nickname) {
         setState(() {
-          final newPeer = ChatPeer(senderPublicKey, nickname);
+          final newPeer = ChatPeer(rawPublicKey: senderPublicKey, nickname: nickname);
           _peers.add(newPeer);
           _selectedPeer ??= newPeer;
         });
@@ -407,14 +407,22 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _handleConnectNewPeer(String nickname, String key) {
+    final String cleanedKey = key.trim();
     bool alreadyExists = _peers.any((p) => p.rawPublicKey.trim() == key);
+
     if (alreadyExists) {
       setState(() {
         _selectedPeer = _peers.firstWhere((p) => p.rawPublicKey.trim() == key);
       });
     } else {
-      _sendFriendRequest(key);
+      setState(() {
+        final newPeer = ChatPeer(rawPublicKey: cleanedKey, nickname: nickname, isPending: true);
+        _peers.add(newPeer);
+        _selectedPeer = newPeer;
+      });
+      _sendFriendRequest(cleanedKey);
     }
+
     _keyInputController.clear();
     _nameController.clear();
   }
