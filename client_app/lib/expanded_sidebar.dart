@@ -104,7 +104,12 @@ class ExpandedSidebar extends StatelessWidget {
         children: [
           CircleAvatar(
             backgroundColor: isSelected ? Colors.tealAccent : Colors.white10,
-            child: Text(
+            child: p.isPending
+            ? Icon(
+              Icons.access_time,
+              color: isSelected ? Colors.black : Colors.tealAccent,
+            )
+            : Text(
               p.nickname[0].toUpperCase(),
               style: TextStyle(
                 color: isSelected ? Colors.black : Colors.tealAccent,
