@@ -207,10 +207,7 @@ class Dialogs {
   static void showUnknownPeerDialog({
     required BuildContext context,
     required String senderPublicKey,
-    required String initialMessage,
-    required String msgId,
-    required dynamic arrivalTime,
-    required Function(String nickname, String msgId, DateTime time) onAccept,
+    required Function(String nickname) onAccept,
   }) {
     final TextEditingController incomingNameController =
         TextEditingController();
@@ -257,8 +254,6 @@ class Dialogs {
               if (incomingNameController.text.isNotEmpty) {
                 onAccept(
                   incomingNameController.text.trim(),
-                  msgId,
-                  arrivalTime,
                 );
                 Navigator.pop(ctx);
               }

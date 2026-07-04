@@ -253,6 +253,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         return;
       }
 
+      if (parsedPayloadMap['isFriendRequest'] == true) {
+        _processFriendRequest(senderPublicKey);
+      }
+
       _processIncomingMessage(
         senderPublicKey,
         parsedPayloadMap['text'] ?? '',
@@ -273,6 +277,28 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     });
   }
 
+  void _processFriendRequest(String senderPublicKey) {
+    bool peerExists = _peers.any(
+      (p) => p.rawPublicKey.trim() == senderPublicKey,
+    );
+
+    if (peerExists) return;
+
+    Dialogs.showUnknownPeerDialog(
+      context: context,
+      senderPublicKey: senderPublicKey,
+      onAccept: (nickname) {
+        setState(() {
+          final newPeer = ChatPeer(senderPublicKey, nickname);
+          _peers.add(newPeer);
+          _selectedPeer ??= newPeer;
+        });
+        _syncPeersToStorage();
+        _scrollToBottom();
+      },
+    );
+  }
+
   void _processIncomingMessage(
     String senderPublicKey,
     String rawCiphertext,
@@ -281,9 +307,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     final String messageText = payloadMap['text'];
     final String msgId = payloadMap['msgId'];
     final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
-    bool peerExists = _peers.any(
-      (p) => p.rawPublicKey.trim() == senderPublicKey,
-    );
 
     await StorageService.persistEncryptedMessage(
       peerPublicKey: senderPublicKey,
@@ -293,73 +316,44 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       timestampIso: sentTime.toIso8601String(),
     );
 
-    if (peerExists) {
-      setState(() {
-        final sender = _peers.firstWhere(
-          (p) => p.rawPublicKey.trim() == senderPublicKey,
+    setState(() {
+      final sender = _peers.firstWhere(
+        (p) => p.rawPublicKey.trim() == senderPublicKey,
+      );
+      if (!sender.messages.any((m) => m.id == msgId)) {
+        final newIncomingMsg = ChatMessage(
+          messageText,
+          false,
+          customTime: sentTime,
+          customId: msgId,
         );
-        if (!sender.messages.any((m) => m.id == msgId)) {
-          final newIncomingMsg = ChatMessage(
+
+        final bool isChatOpenAndVisible =
+            _selectedPeer == sender && _isWindowInFocus && _autoScroll;
+
+        if (isChatOpenAndVisible) {
+          newIncomingMsg.isRead = true;
+          _sendReadReceipt(senderPublicKey, msgId);
+        } else {
+          newIncomingMsg.isRead = false;
+          NotificationService.showNotification(
+            id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            title: "New Message from ${sender.nickname}",
+            body: messageText,
+          );
+        }
+
+        sender.messages.add(
+          ChatMessage(
             messageText,
             false,
             customTime: sentTime,
             customId: msgId,
-          );
-
-          final bool isChatOpenAndVisible =
-              _selectedPeer == sender && _isWindowInFocus && _autoScroll;
-
-          if (isChatOpenAndVisible) {
-            newIncomingMsg.isRead = true;
-            _sendReadReceipt(senderPublicKey, msgId);
-          } else {
-            newIncomingMsg.isRead = false;
-            NotificationService.showNotification(
-              id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-              title: "New Message from ${sender.nickname}",
-              body: messageText,
-            );
-          }
-
-          sender.messages.add(
-            ChatMessage(
-              messageText,
-              false,
-              customTime: sentTime,
-              customId: msgId,
-            ),
-          );
-        }
-      });
-      _scrollToBottom();
-    } else {
-      if (!mounted) return;
-      Dialogs.showUnknownPeerDialog(
-        context: context,
-        senderPublicKey: senderPublicKey,
-        initialMessage: messageText,
-        msgId: msgId,
-        arrivalTime: sentTime,
-        onAccept: (nickname, acceptedMsgId, acceptedTime) {
-          setState(() {
-            final newPeer = ChatPeer(senderPublicKey, nickname);
-            newPeer.messages.add(
-              ChatMessage(
-                messageText,
-                false,
-                customTime: acceptedTime,
-                customId: acceptedMsgId,
-              ),
-            );
-            _peers.add(newPeer);
-            _selectedPeer ??= newPeer;
-            _sendReadReceipt(senderPublicKey, acceptedMsgId);
-          });
-          _syncPeersToStorage();
-          _scrollToBottom();
-        },
-      );
-    }
+          ),
+        );
+      }
+    });
+    _scrollToBottom();
   }
 
   void _checkAndSendPendingReceipts() {
@@ -397,6 +391,21 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
+  void _sendFriendRequest(String targetKey) {
+    if (_channel == null) return;
+    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
+    final requestPayload = jsonEncode({"isFriendRequest": true});
+
+    _channel!.sink.add(
+      jsonEncode({
+        "type": "message",
+        "fromUser": _myRawPublicKey,
+        "toUser": targetKey.trim(),
+        "payload": recipientPublicKeyObj.encrypt(requestPayload),
+      }),
+    );
+  }
+
   void _handleConnectNewPeer(String nickname, String key) {
     bool alreadyExists = _peers.any((p) => p.rawPublicKey.trim() == key);
     if (alreadyExists) {
@@ -404,9 +413,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         _selectedPeer = _peers.firstWhere((p) => p.rawPublicKey.trim() == key);
       });
     } else {
-      setState(() => _peers.add(ChatPeer(key, nickname)));
-      _selectedPeer ??= _peers.last;
-      _syncPeersToStorage();
+      _sendFriendRequest(key);
     }
     _keyInputController.clear();
     _nameController.clear();
@@ -423,7 +430,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     // define ChatMessage object
     final newMsg = ChatMessage(text, true);
-    
+
     final recipientPublicKeyObj = RSAPublicKey.fromString(
       _selectedPeer!.rawPublicKey.trim(),
     );
@@ -431,6 +438,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     // define JSON payload from the ChatMessage obj
     final innerMessagePayload = jsonEncode({
       "isReceipt": false,
+      "isFriendRequest": false,
       "text": text,
       "msgId": newMsg.id,
       "timestamp": newMsg.timestamp.toIso8601String(),
