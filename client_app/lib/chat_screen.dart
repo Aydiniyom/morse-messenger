@@ -225,6 +225,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         final String rsaEncryptedKeyBundle = hybridBundle['encryptedAesKey'];
         final String base64Ciphertext = hybridBundle['ciphertext'];
 
+        // decrypt AES key & IV using RSA priv key
         final decryptedKeyBundleString = _privKey.decrypt(
           rsaEncryptedKeyBundle,
         );
@@ -235,6 +236,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         final aesKey = enc.Key.fromBase64(keyBundleMap['key']);
         final iv = enc.IV.fromBase64(keyBundleMap['iv']);
 
+        // decrypt AES encrypted message payload
         final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.cbc));
         final decryptedMessageTextPayload = encrypter.decrypt64(
           base64Ciphertext,
@@ -410,6 +412,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     _nameController.clear();
   }
 
+  /// send AES + RSA encrypted chat message to the ws sink
   void _sendMessage() async {
     if (_msgController.text.isEmpty ||
         _selectedPeer == null ||
@@ -417,11 +420,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       return;
 
     final text = _msgController.text;
+
+    // define ChatMessage object
     final newMsg = ChatMessage(text, true);
+    
     final recipientPublicKeyObj = RSAPublicKey.fromString(
       _selectedPeer!.rawPublicKey.trim(),
     );
 
+    // define JSON payload from the ChatMessage obj
     final innerMessagePayload = jsonEncode({
       "isReceipt": false,
       "text": text,
@@ -429,6 +436,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       "timestamp": newMsg.timestamp.toIso8601String(),
     });
 
+    // handle AES encryption of the ChatMessage JSON Payload
     final ephemeralAesKey = enc.Key.fromSecureRandom(32);
     final iv = enc.IV.fromSecureRandom(16);
     final encrypter = enc.Encrypter(
@@ -436,6 +444,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
     final encryptedCiphertext = encrypter.encrypt(innerMessagePayload, iv: iv);
 
+    // handle RSA encryption of the AES key and IV
     final keyBundleToEncrypt = jsonEncode({
       "key": ephemeralAesKey.base64,
       "iv": iv.base64,
@@ -444,11 +453,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       keyBundleToEncrypt,
     );
 
+    // define the final network packet containing the
+    // 1. ChatMessage contents (AES encrypted)
+    // 2. AES key + IV to decrypt the ChatMessage contents (RSA encrypted)
     final structuralNetworkPacket = jsonEncode({
       "encryptedAesKey": rsaEncryptedKeyBundle,
       "ciphertext": encryptedCiphertext.base64,
     });
 
+    // send the packet off to the ws sink
     _channel!.sink.add(
       jsonEncode({
         "type": "message",
