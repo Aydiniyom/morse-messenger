@@ -187,9 +187,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _handleIncomingPacket(String rawData) {
+    Map<String, dynamic>? parsedPayloadMap;
+    String senderPublicKey = '';
+
     try {
       final data = jsonDecode(rawData);
-      final String senderPublicKey = data['fromUser'].toString().trim();
+      senderPublicKey = data['fromUser'].toString().trim();
       final String rawPayload = data['payload'].toString();
       final String packetType = data['type'] ?? '';
 
@@ -213,7 +216,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       }
 
       String decryptedPayloadString;
-      Map<String, dynamic>? parsedPayloadMap;
       bool isHybridPacket = false;
 
       try {
@@ -248,54 +250,62 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
         parsedPayloadMap = jsonDecode(decryptedMessageTextPayload);
       }
-
-      if (parsedPayloadMap == null) return;
-
-      if (parsedPayloadMap['isReceipt'] == true) {
-        _processReadReceipt(senderPublicKey, parsedPayloadMap['msgId']);
-        return;
-      }
-
-      if (parsedPayloadMap['isFriendRequest'] == true) {
-        _processFriendRequest(senderPublicKey);
-        return;
-      }
-
-      if (parsedPayloadMap['didAcceptFRequest'] == true) {
-        setState(() {
-          final peerIndex = _peers.indexWhere(
-            (p) => p.rawPublicKey.trim() == senderPublicKey,
-          );
-
-          if (peerIndex != -1) {
-            final peer = _peers[peerIndex];
-            if (peer.isPending) {
-              peer.isPending = false;
-            }
-          }
-        });
-        _syncPeersToStorage();
-        return;
-      }
-
-      _processIncomingMessage(
-        senderPublicKey,
-        parsedPayloadMap['text'] ?? '',
-        parsedPayloadMap,
-      );
-    } catch (e) {
-      debugPrint("Hybrid decryption failed: $e");
+    } catch (decryptionError) {
+      debugPrint("Actual decryption/parsing failed: $decryptionError");
+      return;
     }
+
+    if (parsedPayloadMap == null) return;
+
+    if (parsedPayloadMap['isReceipt'] == true) {
+      _processReadReceipt(senderPublicKey, parsedPayloadMap['msgId']);
+      return;
+    }
+
+    if (parsedPayloadMap['isFriendRequest'] == true) {
+      _processFriendRequest(senderPublicKey);
+      return;
+    }
+
+    if (parsedPayloadMap['didAcceptFRequest'] == true) {
+      setState(() {
+        final peerIndex = _peers.indexWhere(
+          (p) => p.rawPublicKey.trim() == senderPublicKey,
+        );
+        if (peerIndex != -1) {
+          _peers[peerIndex].isPending = false;
+        }
+      });
+      _syncPeersToStorage();
+      return;
+    }
+
+    _processIncomingMessage(
+      senderPublicKey,
+      parsedPayloadMap['text'] ?? '',
+      parsedPayloadMap,
+    );
   }
 
   void _processReadReceipt(String senderPublicKey, String targetMsgId) {
-    setState(() {
-      final peer = _peers.firstWhere(
-        (p) => p.rawPublicKey.trim() == senderPublicKey,
-      );
-      final msg = peer.messages.firstWhere((m) => m.id == targetMsgId);
-      msg.isRead = true;
-    });
+    final cleanedSenderKey = senderPublicKey.trim();
+
+    // Find the peer safely
+    final peerIndex = _peers.indexWhere(
+      (p) => p.rawPublicKey.trim() == cleanedSenderKey,
+    );
+    if (peerIndex == -1) return;
+
+    final peer = _peers[peerIndex];
+
+    // Find the message safely using indexWhere or a loop
+    final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
+
+    if (msgIndex != -1) {
+      setState(() {
+        peer.messages[msgIndex].isRead = true;
+      });
+    }
   }
 
   void _processFriendRequest(String senderPublicKey) {
@@ -375,14 +385,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           );
         }
 
-        sender.messages.add(
-          ChatMessage(
-            messageText,
-            false,
-            customTime: sentTime,
-            customId: msgId,
-          ),
-        );
+        sender.messages.add(newIncomingMsg);
       }
     });
     _scrollToBottom();
@@ -781,12 +784,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 onNotification: (scrollInfo) {
                   final isAtBottom =
                       scrollInfo.metrics.pixels >=
-                      (scrollInfo.metrics.maxScrollExtent - 10);
+                      (scrollInfo.metrics.maxScrollExtent - 20);
                   if (isAtBottom && !_autoScroll) {
                     _autoScroll = true;
                     _checkAndSendPendingReceipts();
-                  } else if (!isAtBottom && _autoScroll) {
-                    _autoScroll = false;
+                  } else if (!isAtBottom &&
+                      _autoScroll &&
+                      scrollInfo is ScrollUpdateNotification &&
+                      scrollInfo.dragDetails != null) {
+                    setState(() {
+                      _autoScroll = false;
+                    });
                   }
                   return true;
                 },
