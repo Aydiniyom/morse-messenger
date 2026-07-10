@@ -20,8 +20,11 @@ class StorageService {
   static const String _savedMessagesDataKey = 'persistent_saved_messages_json';
 
   static Future<void> initDatabase() async {
-    await Hive.initFlutter('morse-messenger');
+    const isTestMode = String.fromEnvironment('APP_ENV') == 'test';
+    final storageDirectory = isTestMode ? "morse-test" : "morse-messenger";
     
+    await Hive.initFlutter(storageDirectory);
+
     // Pre-open the configuration settings box on startup
     await Hive.openBox(_settingsBoxName);
   }
@@ -56,20 +59,32 @@ class StorageService {
   static Future<Box> _getIdentityBox() async {
     final encryptionKey = await _getDatabaseKey();
     try {
-      return await Hive.openBox(_identityBoxName, encryptionCipher: HiveAesCipher(encryptionKey));
+      return await Hive.openBox(
+        _identityBoxName,
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
     } catch (e) {
       await Hive.deleteBoxFromDisk(_identityBoxName);
-      return await Hive.openBox(_identityBoxName, encryptionCipher: HiveAesCipher(encryptionKey));
+      return await Hive.openBox(
+        _identityBoxName,
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
     }
   }
 
   static Future<Box> _getHistoryBox() async {
     final encryptionKey = await _getDatabaseKey();
     try {
-      return await Hive.openBox(_historyBoxName, encryptionCipher: HiveAesCipher(encryptionKey));
+      return await Hive.openBox(
+        _historyBoxName,
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
     } catch (e) {
       await Hive.deleteBoxFromDisk(_historyBoxName);
-      return await Hive.openBox(_historyBoxName, encryptionCipher: HiveAesCipher(encryptionKey));
+      return await Hive.openBox(
+        _historyBoxName,
+        encryptionCipher: HiveAesCipher(encryptionKey),
+      );
     }
   }
 
@@ -95,7 +110,9 @@ class StorageService {
   }
 
   // --- PEER PROFILE CONTACT INDEXES ---
-  static Future<void> savePeerList(List<Map<String, String>> serializedPeers) async {
+  static Future<void> savePeerList(
+    List<Map<String, String>> serializedPeers,
+  ) async {
     try {
       final box = await _getIdentityBox();
       await box.put(_peerListKey, jsonEncode(serializedPeers));
@@ -135,9 +152,10 @@ class StorageService {
       final String rawJsonString = box.get(hiveSafeKey, defaultValue: "[]");
       final List<dynamic> decodedList = jsonDecode(rawJsonString);
 
-      List<Map<String, dynamic>> messageHistory = List<Map<String, dynamic>>.from(
-        decodedList.map((item) => Map<String, dynamic>.from(item as Map)),
-      );
+      List<Map<String, dynamic>> messageHistory =
+          List<Map<String, dynamic>>.from(
+            decodedList.map((item) => Map<String, dynamic>.from(item as Map)),
+          );
 
       messageHistory.add({
         "id": msgId,
@@ -153,7 +171,9 @@ class StorageService {
     }
   }
 
-  static Future<List<Map<String, dynamic>>> fetchHistory(String peerPublicKey) async {
+  static Future<List<Map<String, dynamic>>> fetchHistory(
+    String peerPublicKey,
+  ) async {
     try {
       final box = await _getHistoryBox();
       final hiveSafeKey = _toBoxKey(peerPublicKey);
@@ -200,7 +220,9 @@ class StorageService {
       await identityBox.clear();
       await historyBox.clear();
 
-      debugPrint("Identity and history boxes cleared successfully. Server IP preserved.");
+      debugPrint(
+        "Identity and history boxes cleared successfully. Server IP preserved.",
+      );
     } catch (e) {
       debugPrint("Error performing identity reset: $e");
     }
@@ -214,7 +236,10 @@ class StorageService {
   }) async {
     try {
       final box = _getSettingsBox();
-      final String rawJsonString = box.get(_savedMessagesDataKey, defaultValue: "[]");
+      final String rawJsonString = box.get(
+        _savedMessagesDataKey,
+        defaultValue: "[]",
+      );
       final List<dynamic> decodedList = jsonDecode(rawJsonString);
 
       List<Map<String, dynamic>> savedHistory = List<Map<String, dynamic>>.from(
@@ -238,7 +263,10 @@ class StorageService {
   static List<Map<String, dynamic>> fetchSavedMessages() {
     try {
       final box = _getSettingsBox();
-      final String rawJsonString = box.get(_savedMessagesDataKey, defaultValue: "[]");
+      final String rawJsonString = box.get(
+        _savedMessagesDataKey,
+        defaultValue: "[]",
+      );
       final List<dynamic> decodedList = jsonDecode(rawJsonString);
 
       return List<Map<String, dynamic>>.from(

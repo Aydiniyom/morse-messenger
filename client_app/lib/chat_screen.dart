@@ -289,18 +289,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   void _processReadReceipt(String senderPublicKey, String targetMsgId) {
     final cleanedSenderKey = senderPublicKey.trim();
-
-    // Find the peer safely
+    
+    // Safely find the peer index
     final peerIndex = _peers.indexWhere(
       (p) => p.rawPublicKey.trim() == cleanedSenderKey,
     );
     if (peerIndex == -1) return;
-
+    
     final peer = _peers[peerIndex];
-
-    // Find the message safely using indexWhere or a loop
+    
+    // Safely find the message index
     final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
-
+    
     if (msgIndex != -1) {
       setState(() {
         peer.messages[msgIndex].isRead = true;
@@ -415,7 +415,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     if (_channel == null) return;
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
     final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
-
+    
     _channel!.sink.add(
       jsonEncode({
         "type": "message",
