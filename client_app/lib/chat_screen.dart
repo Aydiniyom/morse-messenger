@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:client_app/notification_service.dart';
 import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import 'storage_service.dart';
 import 'connection_setup_screen.dart';
 import 'expanded_sidebar.dart';
 import 'compact_sidebar.dart';
+import 'package:file_picker/file_picker.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -86,6 +88,111 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     if (_isWindowInFocus && _selectedPeer != null) {
       _checkAndSendPendingReceipts();
+    }
+  }
+
+  // --- MEDIA PICKER ---
+  Future<void> _pickAndSendMedia() async {
+    if (_selectedPeer == null || _channel == null) return;
+
+    // Pick a single file matching arbitrary binary formats
+    FilePickerResult? result = await FilePicker.pickFiles(
+      withData:
+          true, // Crucial for reading underlying bytes directly into memory
+    );
+
+    if (result == null || result.files.isEmpty) return;
+
+    final file = result.files.first;
+    final String fileName = file.name;
+
+    // Deduce general category
+    String mediaType = 'document';
+    final extension = file.extension?.toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp'].contains(extension)) {
+      mediaType = 'image';
+    } else if (['mp3', 'wav', 'm4a', 'ogg'].contains(extension)) {
+      mediaType = 'audio';
+    }
+
+    final Uint8List fileBytes =
+        file.bytes ?? await File(file.path!).readAsBytes();
+    final String base64Payload = base64Encode(fileBytes);
+
+    final targetPeer = _selectedPeer!;
+    final cleanedTargetKey = targetPeer.rawPublicKey.trim();
+    final String msgId =
+        "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
+    final DateTime now = DateTime.now();
+
+    try {
+      final recipientPublicKeyObj = RSAPublicKey.fromString(cleanedTargetKey);
+
+      // Package media variables completely inside the AES secure capsule envelope
+      final rawInnerPayloadJson = jsonEncode({
+        "text": "[Sent an Attachment: $fileName]",
+        "msgId": msgId,
+        "timestamp": now.toIso8601String(),
+        "mediaType": mediaType,
+        "mediaFileName": fileName,
+        "base64Data": base64Payload,
+      });
+
+      final ephemeralAesKey = enc.Key.fromSecureRandom(32);
+      final iv = enc.IV.fromSecureRandom(16);
+      final encrypter = enc.Encrypter(
+        enc.AES(ephemeralAesKey, mode: enc.AESMode.cbc),
+      );
+      final encryptedCiphertext = encrypter.encrypt(
+        rawInnerPayloadJson,
+        iv: iv,
+      );
+
+      final keyBundleToEncrypt = jsonEncode({
+        "key": ephemeralAesKey.base64,
+        "iv": iv.base64,
+      });
+      final rsaEncryptedKeyBundle = recipientPublicKeyObj.encrypt(
+        keyBundleToEncrypt,
+      );
+
+      await StorageService.persistEncryptedMessage(
+        peerPublicKey: cleanedTargetKey,
+        msgId: msgId,
+        isMe: true,
+        encryptedPayload: encryptedCiphertext.base64,
+        timestampIso: now.toIso8601String(),
+      );
+
+      setState(() {
+        targetPeer.messages.add(
+          ChatMessage(
+            "[Sent an Attachment: $fileName]",
+            true,
+            customTime: now,
+            customId: msgId,
+            mediaType: mediaType,
+            mediaFileName: fileName,
+            base64Data: base64Payload,
+            localPath: file.path,
+          ),
+        );
+      });
+      _scrollToBottom();
+
+      _channel!.sink.add(
+        jsonEncode({
+          "type": "message",
+          "fromUser": _myRawPublicKey.trim(),
+          "toUser": cleanedTargetKey,
+          "payload": jsonEncode({
+            "encryptedAesKey": rsaEncryptedKeyBundle,
+            "ciphertext": encryptedCiphertext.base64,
+          }),
+        }),
+      );
+    } catch (e) {
+      debugPrint("Failed to serialise media output pipeline: $e");
     }
   }
 
@@ -289,18 +396,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   void _processReadReceipt(String senderPublicKey, String targetMsgId) {
     final cleanedSenderKey = senderPublicKey.trim();
-    
+
     // Safely find the peer index
     final peerIndex = _peers.indexWhere(
       (p) => p.rawPublicKey.trim() == cleanedSenderKey,
     );
     if (peerIndex == -1) return;
-    
+
     final peer = _peers[peerIndex];
-    
+
     // Safely find the message index
     final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
-    
+
     if (msgIndex != -1) {
       setState(() {
         peer.messages[msgIndex].isRead = true;
@@ -350,6 +457,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     final String msgId = payloadMap['msgId'];
     final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
 
+    final String? mediaType = payloadMap['mediaType'];
+    final String? mediaFileName = payloadMap['mediaFileName'];
+    final String? base64Data = payloadMap['base64Data'];
+
     await StorageService.persistEncryptedMessage(
       peerPublicKey: senderPublicKey,
       msgId: msgId,
@@ -368,6 +479,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           false,
           customTime: sentTime,
           customId: msgId,
+          mediaType: mediaType,
+          mediaFileName: mediaFileName,
+          base64Data: base64Data,
         );
 
         final bool isChatOpenAndVisible =
@@ -415,7 +529,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     if (_channel == null) return;
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
     final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
-    
+
     _channel!.sink.add(
       jsonEncode({
         "type": "message",
@@ -904,6 +1018,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       padding: const EdgeInsets.all(24.0),
       child: Row(
         children: [
+          IconButton(
+            onPressed: _pickAndSendMedia,
+            icon: Icon(Icons.attach_file_rounded, color: Colors.tealAccent),
+          ),
           Expanded(
             child: TextField(
               controller: _msgController,
