@@ -24,3 +24,16 @@ plugins {
 }
 
 include(":app")
+
+gradle.lifecycle.beforeProject {
+    if (path != ":app" && path != ":") {
+        afterEvaluate {
+            if (hasProperty("android")) {
+                val androidExtension = extensions.getByName("android")
+                if (androidExtension is com.android.build.gradle.BaseExtension) {
+                    androidExtension.compileSdkVersion(36)
+                }
+            }
+        }
+    }
+}

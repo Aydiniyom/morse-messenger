@@ -96,7 +96,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     if (_selectedPeer == null || _channel == null) return;
 
     // Pick a single file matching arbitrary binary formats
-    FilePickerResult? result = await FilePicker.pickFiles(
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
       withData:
           true, // Crucial for reading underlying bytes directly into memory
     );
