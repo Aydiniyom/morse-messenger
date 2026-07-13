@@ -4,10 +4,9 @@ import 'package:client_app/notification_service.dart';
 import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:crypton/crypton.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:encrypt/encrypt.dart' as enc;
+import 'package:file_picker/file_picker.dart';
 
 import 'models.dart';
 import 'dialogs.dart';
@@ -15,7 +14,7 @@ import 'storage_service.dart';
 import 'connection_setup_screen.dart';
 import 'expanded_sidebar.dart';
 import 'compact_sidebar.dart';
-import 'package:file_picker/file_picker.dart';
+import 'chat_session_manager.dart'; // Make sure to import the manager
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -26,8 +25,8 @@ class DecentralizedChat extends StatefulWidget {
 
 class _DecentralizedChatState extends State<DecentralizedChat>
     with WidgetsBindingObserver {
-  bool _isConnecting = false;
-  bool _isServerConnected = false;
+  ChatSessionManager? _sessionManager;
+
   bool _isWindowInFocus = true;
 
   final _msgController = TextEditingController();
@@ -39,7 +38,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   final List<ChatPeer> _peers = [];
   ChatPeer? _selectedPeer;
-  WebSocketChannel? _channel;
   late RSAPrivateKey _privKey;
 
   String _serverIp = "localhost:8080";
@@ -49,7 +47,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   bool _isMobileSidebarExpanded = false;
   bool _isMessageEmpty = true;
 
-  final Set<String> _onlinePeers = {};
+  Set<String> _onlinePeers = {};
 
   @override
   void initState() {
@@ -71,6 +69,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _sessionManager?.disconnect();
     _msgFocusNode.dispose();
     _scrollController.dispose();
     _msgController.dispose();
@@ -88,172 +87,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     if (_isWindowInFocus && _selectedPeer != null) {
       _checkAndSendPendingReceipts();
-    }
-  }
-
-  // --- MEDIA PICKER ---
-  Future<void> _pickAndSendMedia() async {
-    if (_selectedPeer == null || _channel == null) return;
-
-    // Pick a single file matching arbitrary binary formats
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      withData:
-          true, // Crucial for reading underlying bytes directly into memory
-    );
-
-    if (result == null || result.files.isEmpty) return;
-
-    final file = result.files.first;
-    final String fileName = file.name;
-
-    // Deduce general category
-    String mediaType = 'document';
-    final extension = file.extension?.toLowerCase();
-    if (['png', 'jpg', 'jpeg', 'gif', 'webp'].contains(extension)) {
-      mediaType = 'image';
-    } else if (['mp3', 'wav', 'm4a', 'ogg'].contains(extension)) {
-      mediaType = 'audio';
-    }
-
-    final Uint8List fileBytes =
-        file.bytes ?? await File(file.path!).readAsBytes();
-    final String base64Payload = base64Encode(fileBytes);
-
-    final targetPeer = _selectedPeer!;
-    final cleanedTargetKey = targetPeer.rawPublicKey.trim();
-    final String msgId =
-        "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
-    final DateTime now = DateTime.now();
-
-    try {
-      final recipientPublicKeyObj = RSAPublicKey.fromString(cleanedTargetKey);
-
-      // Package media variables completely inside the AES secure capsule envelope
-      final rawInnerPayloadJson = jsonEncode({
-        "text": "[Sent an Attachment: $fileName]",
-        "msgId": msgId,
-        "timestamp": now.toIso8601String(),
-        "mediaType": mediaType,
-        "mediaFileName": fileName,
-        "base64Data": base64Payload,
-      });
-
-      final ephemeralAesKey = enc.Key.fromSecureRandom(32);
-      final iv = enc.IV.fromSecureRandom(16);
-      final encrypter = enc.Encrypter(
-        enc.AES(ephemeralAesKey, mode: enc.AESMode.cbc),
-      );
-      final encryptedCiphertext = encrypter.encrypt(
-        rawInnerPayloadJson,
-        iv: iv,
-      );
-
-      final keyBundleToEncrypt = jsonEncode({
-        "key": ephemeralAesKey.base64,
-        "iv": iv.base64,
-      });
-      final rsaEncryptedKeyBundle = recipientPublicKeyObj.encrypt(
-        keyBundleToEncrypt,
-      );
-
-      await StorageService.persistEncryptedMessage(
-        peerPublicKey: cleanedTargetKey,
-        msgId: msgId,
-        isMe: true,
-        encryptedPayload: encryptedCiphertext.base64,
-        timestampIso: now.toIso8601String(),
-      );
-
-      setState(() {
-        targetPeer.messages.add(
-          ChatMessage(
-            "[Sent an Attachment: $fileName]",
-            true,
-            customTime: now,
-            customId: msgId,
-            mediaType: mediaType,
-            mediaFileName: fileName,
-            base64Data: base64Payload,
-            localPath: file.path,
-          ),
-        );
-      });
-      _scrollToBottom();
-
-      _channel!.sink.add(
-        jsonEncode({
-          "type": "message",
-          "fromUser": _myRawPublicKey.trim(),
-          "toUser": cleanedTargetKey,
-          "payload": jsonEncode({
-            "encryptedAesKey": rsaEncryptedKeyBundle,
-            "ciphertext": encryptedCiphertext.base64,
-          }),
-        }),
-      );
-    } catch (e) {
-      debugPrint("Failed to serialise media output pipeline: $e");
-    }
-  }
-
-  // --- IDENTITY & NETWORKING PIPES ---
-  void _initializeWebSocket() async {
-    _channel?.sink.close();
-    setState(() => _isConnecting = true);
-
-    try {
-      final wsUrl =
-          _serverIp.startsWith("ws://") || _serverIp.startsWith("wss://")
-          ? _serverIp
-          : _serverIp.endsWith('/ws')
-          ? "ws://$_serverIp"
-          : "ws://$_serverIp/ws";
-
-      final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
-      _channel = channel;
-      await channel.ready;
-
-      setState(() {
-        _isServerConnected = true;
-        _isConnecting = false;
-      });
-
-      StorageService.saveServerIp(_serverIp);
-
-      _channel!.sink.add(
-        jsonEncode({
-          "type": "register",
-          "fromUser": _myRawPublicKey,
-          "toUser": "",
-          "payload": "",
-        }),
-      );
-
-      _channel!.stream.listen(
-        (rawData) => _handleIncomingPacket(rawData.toString()),
-        onError: (err) {
-          setState(() {
-            _isServerConnected = false;
-            _isConnecting = false;
-          });
-        },
-        onDone: () {
-          setState(() {
-            _isServerConnected = false;
-            _isConnecting = false;
-          });
-        },
-      );
-    } catch (e) {
-      setState(() {
-        _isServerConnected = false;
-        _isConnecting = false;
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to connect to $_serverIp.')),
-        );
-      }
     }
   }
 
@@ -290,136 +123,125 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       }
     });
 
-    _initializeWebSocket();
+    _startSession();
   }
 
-  void _handleIncomingPacket(String rawData) {
-    Map<String, dynamic>? parsedPayloadMap;
-    String senderPublicKey = '';
-
-    try {
-      final data = jsonDecode(rawData);
-      senderPublicKey = data['fromUser'].toString().trim();
-      final String rawPayload = data['payload'].toString();
-      final String packetType = data['type'] ?? '';
-
-      if (packetType == 'status_update') {
+  void _startSession() {
+    _sessionManager = ChatSessionManager(
+      serverIp: _serverIp,
+      myRawPublicKey: _myRawPublicKey,
+      privKey: _privKey,
+      onStateChanged: () {
+        if (mounted) setState(() {});
+      },
+      onStatusUpdateReceived: (updatedPeers) {
+        if (mounted) {
+          setState(() {
+            _onlinePeers = updatedPeers;
+          });
+        }
+      },
+      onFriendRequestReceived: _processFriendRequest,
+      onFriendRequestAccepted: (senderPublicKey) {
         setState(() {
-          if (senderPublicKey == 'server') {
-            final List<dynamic> currentOnlineList = jsonDecode(data['payload']);
-            _onlinePeers.addAll(
-              currentOnlineList.map((e) => e.toString().trim()),
-            );
-          } else {
-            final String status = data['payload'];
-            if (status == 'online') {
-              _onlinePeers.add(senderPublicKey);
-            } else {
-              _onlinePeers.remove(senderPublicKey);
-            }
+          final peerIndex = _peers.indexWhere(
+            (p) => p.rawPublicKey.trim() == senderPublicKey,
+          );
+          if (peerIndex != -1) {
+            _peers[peerIndex].isPending = false;
           }
         });
-        return;
-      }
+        _syncPeersToStorage();
+      },
+      onReadReceiptReceived: (senderPublicKey, targetMsgId) {
+        final cleanedSenderKey = senderPublicKey.trim();
+        final peerIndex = _peers.indexWhere((p) => p.rawPublicKey.trim() == cleanedSenderKey);
+        if (peerIndex == -1) return;
 
-      String decryptedPayloadString;
-      bool isHybridPacket = false;
+        final peer = _peers[peerIndex];
+        final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
 
-      try {
-        decryptedPayloadString = _privKey.decrypt(rawPayload);
-        parsedPayloadMap = jsonDecode(decryptedPayloadString);
-      } catch (_) {
-        isHybridPacket = true;
-      }
-
-      if (isHybridPacket) {
-        final Map<String, dynamic> hybridBundle = jsonDecode(rawPayload);
-        final String rsaEncryptedKeyBundle = hybridBundle['encryptedAesKey'];
-        final String base64Ciphertext = hybridBundle['ciphertext'];
-
-        // decrypt AES key & IV using RSA priv key
-        final decryptedKeyBundleString = _privKey.decrypt(
-          rsaEncryptedKeyBundle,
-        );
-        final Map<String, dynamic> keyBundleMap = jsonDecode(
-          decryptedKeyBundleString,
-        );
-
-        final aesKey = enc.Key.fromBase64(keyBundleMap['key']);
-        final iv = enc.IV.fromBase64(keyBundleMap['iv']);
-
-        // decrypt AES encrypted message payload
-        final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.cbc));
-        final decryptedMessageTextPayload = encrypter.decrypt64(
-          base64Ciphertext,
-          iv: iv,
-        );
-
-        parsedPayloadMap = jsonDecode(decryptedMessageTextPayload);
-      }
-    } catch (decryptionError) {
-      debugPrint("Actual decryption/parsing failed: $decryptionError");
-      return;
-    }
-
-    if (parsedPayloadMap == null) return;
-
-    if (parsedPayloadMap['isReceipt'] == true) {
-      _processReadReceipt(senderPublicKey, parsedPayloadMap['msgId']);
-      return;
-    }
-
-    if (parsedPayloadMap['isFriendRequest'] == true) {
-      _processFriendRequest(senderPublicKey);
-      return;
-    }
-
-    if (parsedPayloadMap['didAcceptFRequest'] == true) {
-      setState(() {
-        final peerIndex = _peers.indexWhere(
-          (p) => p.rawPublicKey.trim() == senderPublicKey,
-        );
-        if (peerIndex != -1) {
-          _peers[peerIndex].isPending = false;
+        if (msgIndex != -1) {
+          setState(() {
+            peer.messages[msgIndex].isRead = true;
+          });
         }
-      });
-      _syncPeersToStorage();
-      return;
-    }
-
-    _processIncomingMessage(
-      senderPublicKey,
-      parsedPayloadMap['text'] ?? '',
-      parsedPayloadMap,
+      },
+      onMessageReceived: (senderPublicKey, text, payloadMap) {
+        _processIncomingMessage(senderPublicKey, text, payloadMap);
+      },
     );
+
+    _sessionManager!.initializeWebSocket();
   }
 
-  void _processReadReceipt(String senderPublicKey, String targetMsgId) {
-    final cleanedSenderKey = senderPublicKey.trim();
+  // --- MEDIA PICKER ---
+  Future<void> _pickAndSendMedia() async {
+    if (_selectedPeer == null || _sessionManager == null) return;
 
-    // Safely find the peer index
-    final peerIndex = _peers.indexWhere(
-      (p) => p.rawPublicKey.trim() == cleanedSenderKey,
-    );
-    if (peerIndex == -1) return;
+    FilePickerResult? result = await FilePicker.platform.pickFiles(withData: true);
+    if (result == null || result.files.isEmpty) return;
 
-    final peer = _peers[peerIndex];
+    final file = result.files.first;
+    final String fileName = file.name;
 
-    // Safely find the message index
-    final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
+    String mediaType = 'document';
+    final extension = file.extension?.toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp'].contains(extension)) {
+      mediaType = 'image';
+    } else if (['mp3', 'wav', 'm4a', 'ogg'].contains(extension)) {
+      mediaType = 'audio';
+    }
 
-    if (msgIndex != -1) {
+    final Uint8List fileBytes = file.bytes ?? await File(file.path!).readAsBytes();
+    final String base64Payload = base64Encode(fileBytes);
+
+    final targetPeer = _selectedPeer!;
+    final cleanedTargetKey = targetPeer.rawPublicKey.trim();
+    final String msgId = "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
+    final DateTime now = DateTime.now();
+
+    try {
+      await _sessionManager!.sendMediaMessage(
+        targetKey: cleanedTargetKey,
+        msgId: msgId,
+        timestamp: now,
+        text: "[Sent an Attachment: $fileName]",
+        mediaType: mediaType,
+        fileName: fileName,
+        base64Payload: base64Payload,
+      );
+
+      await StorageService.persistEncryptedMessage(
+        peerPublicKey: cleanedTargetKey,
+        msgId: msgId,
+        isMe: true,
+        encryptedPayload: "[Sent an Attachment: $fileName]",
+        timestampIso: now.toIso8601String(),
+      );
+
       setState(() {
-        peer.messages[msgIndex].isRead = true;
+        targetPeer.messages.add(
+          ChatMessage(
+            "[Sent an Attachment: $fileName]",
+            true,
+            customTime: now,
+            customId: msgId,
+            mediaType: mediaType,
+            mediaFileName: fileName,
+            base64Data: base64Payload,
+            localPath: file.path,
+          ),
+        );
       });
+      _scrollToBottom();
+    } catch (e) {
+      debugPrint("Failed to serialise media output pipeline: $e");
     }
   }
 
   void _processFriendRequest(String senderPublicKey) {
-    bool peerExists = _peers.any(
-      (p) => p.rawPublicKey.trim() == senderPublicKey,
-    );
-
+    bool peerExists = _peers.any((p) => p.rawPublicKey.trim() == senderPublicKey);
     if (peerExists) return;
 
     Dialogs.showUnknownPeerDialog(
@@ -427,17 +249,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       senderPublicKey: senderPublicKey,
       onAccept: (nickname) {
         setState(() {
-          final newPeer = ChatPeer(
-            rawPublicKey: senderPublicKey,
-            nickname: nickname,
-          );
+          final newPeer = ChatPeer(rawPublicKey: senderPublicKey, nickname: nickname);
           _peers.add(newPeer);
           _selectedPeer ??= newPeer;
         });
         _syncPeersToStorage();
         _scrollToBottom();
 
-        _sendFriendRequestReaction(senderPublicKey, true);
+        _sessionManager?.sendFriendRequestReaction(senderPublicKey, true);
       },
     );
   }
@@ -447,10 +266,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     String rawCiphertext,
     Map<String, dynamic> payloadMap,
   ) async {
-    bool peerExists = _peers.any(
-      (p) => p.rawPublicKey.trim() == senderPublicKey,
-    );
-
+    bool peerExists = _peers.any((p) => p.rawPublicKey.trim() == senderPublicKey);
     if (!peerExists) return;
 
     final String messageText = payloadMap['text'];
@@ -470,9 +286,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
 
     setState(() {
-      final sender = _peers.firstWhere(
-        (p) => p.rawPublicKey.trim() == senderPublicKey,
-      );
+      final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
       if (!sender.messages.any((m) => m.id == msgId)) {
         final newIncomingMsg = ChatMessage(
           messageText,
@@ -484,12 +298,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           base64Data: base64Data,
         );
 
-        final bool isChatOpenAndVisible =
-            _selectedPeer == sender && _isWindowInFocus && _autoScroll;
+        final bool isChatOpenAndVisible = _selectedPeer == sender && _isWindowInFocus && _autoScroll;
 
         if (isChatOpenAndVisible) {
           newIncomingMsg.isRead = true;
-          _sendReadReceipt(senderPublicKey, msgId);
+          _sessionManager?.sendReadReceipt(senderPublicKey, msgId);
         } else {
           newIncomingMsg.isRead = false;
           NotificationService.showNotification(
@@ -506,15 +319,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _checkAndSendPendingReceipts() {
-    if (_selectedPeer == null || !_isWindowInFocus || !_autoScroll) return;
-    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey)
-      return;
+    if (_selectedPeer == null || !_isWindowInFocus || !_autoScroll || _sessionManager == null) return;
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) return;
 
     bool stateChanged = false;
 
     for (var m in _selectedPeer!.messages) {
       if (!m.isMe && !m.isRead) {
-        _sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
+        _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
         m.isRead = true;
         stateChanged = true;
       }
@@ -523,51 +335,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     if (stateChanged) {
       setState(() {});
     }
-  }
-
-  void _sendReadReceipt(String targetKey, String messageId) {
-    if (_channel == null) return;
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
-
-    _channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": _myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(receiptPayload),
-      }),
-    );
-  }
-
-  void _sendFriendRequest(String targetKey) {
-    if (_channel == null) return;
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    final requestPayload = jsonEncode({"isFriendRequest": true});
-
-    _channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": _myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(requestPayload),
-      }),
-    );
-  }
-
-  void _sendFriendRequestReaction(String targetKey, bool didAccept) {
-    if (_channel == null) return;
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    final requestPayload = jsonEncode({"didAcceptFRequest": didAccept});
-
-    _channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": _myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(requestPayload),
-      }),
-    );
   }
 
   void _handleConnectNewPeer(String nickname, String key) {
@@ -580,79 +347,28 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       });
     } else {
       setState(() {
-        final newPeer = ChatPeer(
-          rawPublicKey: cleanedKey,
-          nickname: nickname,
-          isPending: true,
-        );
+        final newPeer = ChatPeer(rawPublicKey: cleanedKey, nickname: nickname, isPending: true);
         _peers.add(newPeer);
         _selectedPeer = newPeer;
       });
-      _sendFriendRequest(cleanedKey);
+      _sessionManager?.sendFriendRequest(cleanedKey);
     }
 
     _keyInputController.clear();
     _nameController.clear();
   }
 
-  /// send AES + RSA encrypted chat message to the ws sink
   void _sendMessage() async {
-    if (_msgController.text.isEmpty ||
-        _selectedPeer == null ||
-        _channel == null)
-      return;
+    if (_msgController.text.isEmpty || _selectedPeer == null || _sessionManager == null) return;
 
     final text = _msgController.text;
-
-    // define ChatMessage object
     final newMsg = ChatMessage(text, true);
 
-    final recipientPublicKeyObj = RSAPublicKey.fromString(
-      _selectedPeer!.rawPublicKey.trim(),
-    );
-
-    // define JSON payload from the ChatMessage obj
-    final innerMessagePayload = jsonEncode({
-      "isReceipt": false,
-      "isFriendRequest": false,
-      "text": text,
-      "msgId": newMsg.id,
-      "timestamp": newMsg.timestamp.toIso8601String(),
-    });
-
-    // handle AES encryption of the ChatMessage JSON Payload
-    final ephemeralAesKey = enc.Key.fromSecureRandom(32);
-    final iv = enc.IV.fromSecureRandom(16);
-    final encrypter = enc.Encrypter(
-      enc.AES(ephemeralAesKey, mode: enc.AESMode.cbc),
-    );
-    final encryptedCiphertext = encrypter.encrypt(innerMessagePayload, iv: iv);
-
-    // handle RSA encryption of the AES key and IV
-    final keyBundleToEncrypt = jsonEncode({
-      "key": ephemeralAesKey.base64,
-      "iv": iv.base64,
-    });
-    final rsaEncryptedKeyBundle = recipientPublicKeyObj.encrypt(
-      keyBundleToEncrypt,
-    );
-
-    // define the final network packet containing the
-    // 1. ChatMessage contents (AES encrypted)
-    // 2. AES key + IV to decrypt the ChatMessage contents (RSA encrypted)
-    final structuralNetworkPacket = jsonEncode({
-      "encryptedAesKey": rsaEncryptedKeyBundle,
-      "ciphertext": encryptedCiphertext.base64,
-    });
-
-    // send the packet off to the ws sink
-    _channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": _myRawPublicKey,
-        "toUser": _selectedPeer!.rawPublicKey.trim(),
-        "payload": structuralNetworkPacket,
-      }),
+    await _sessionManager!.sendChatMessage(
+      targetKey: _selectedPeer!.rawPublicKey.trim(),
+      text: text,
+      msgId: newMsg.id,
+      timestamp: newMsg.timestamp,
     );
 
     await StorageService.persistEncryptedMessage(
@@ -693,9 +409,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _syncPeersToStorage() async {
-    final serialized = _peers
-        .map((p) => {"nickname": p.nickname, "publicKey": p.rawPublicKey})
-        .toList();
+    final serialized = _peers.map((p) => {"nickname": p.nickname, "publicKey": p.rawPublicKey}).toList();
     await StorageService.savePeerList(serialized);
   }
 
@@ -728,20 +442,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     for (var m in p.messages) {
       if (!m.isMe && !m.isRead) {
-        _sendReadReceipt(p.rawPublicKey, m.id);
+        _sessionManager?.sendReadReceipt(p.rawPublicKey, m.id);
         m.isRead = true;
       }
     }
   }
 
-  // --- CONTEXT POPUP ACTION HANDLING ---
-  void _showDynamicContextMenu(
-    BuildContext context,
-    TapDownDetails details,
-    ChatMessage message,
-  ) {
-    final RenderBox overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox;
+  void _showDynamicContextMenu(BuildContext context, TapDownDetails details, ChatMessage message) {
+    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
 
     showMenu(
       context: context,
@@ -752,70 +460,31 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       items: [
         const PopupMenuItem(
           value: 'copy',
-          child: Row(
-            children: [
-              Icon(Icons.copy_rounded, size: 16, color: Colors.white70),
-              SizedBox(width: 10),
-              Text('Copy'),
-            ],
-          ),
+          child: Row(children: [Icon(Icons.copy_rounded, size: 16, color: Colors.white70), SizedBox(width: 10), Text('Copy')]),
         ),
         PopupMenuItem(
           value: 'save',
-          child: Row(
-            children: [
-              Icon(
-                Icons.bookmark_outline_rounded,
-                size: 16,
-                color: Colors.white70,
-              ),
-              SizedBox(width: 10),
-              Text('Save'),
-            ],
-          ),
+          child: Row(children: [Icon(Icons.bookmark_outline_rounded, size: 16, color: Colors.white70), SizedBox(width: 10), Text('Save')]),
         ),
         const PopupMenuItem(
           value: 'delete',
-          child: Row(
-            children: [
-              Icon(
-                Icons.delete_outline_rounded,
-                size: 16,
-                color: Colors.redAccent,
-              ),
-              SizedBox(width: 10),
-              Text('Delete', style: TextStyle(color: Colors.redAccent)),
-            ],
-          ),
+          child: Row(children: [Icon(Icons.delete_outline_rounded, size: 16, color: Colors.redAccent), SizedBox(width: 10), Text('Delete', style: TextStyle(color: Colors.redAccent))]),
         ),
       ],
       elevation: 8,
     ).then((selectedValue) async {
       if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Message copied to clipboard'),
-            duration: Duration(seconds: 1),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message copied to clipboard'), duration: Duration(seconds: 1)));
       } else if (selectedValue == 'delete') {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Delete clicked (Placeholder active)')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delete clicked (Placeholder active)')));
       } else if (selectedValue == 'save') {
         await StorageService.forwardToSavedMessages(
           msgId: DateTime.now().millisecondsSinceEpoch.toString(),
           encryptedPayload: message.text,
           timestampIso: DateTime.now().toIso8601String(),
         );
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Message saved'),
-            duration: Duration(seconds: 1),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message saved'), duration: Duration(seconds: 1)));
       }
     });
   }
@@ -827,7 +496,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       onResetIdentity: _resetIdentity,
       onSaveAndConnect: (targetIp) {
         setState(() => _serverIp = targetIp);
-        _initializeWebSocket();
+        _startSession();
       },
     );
   }
@@ -843,24 +512,16 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
       _peers.clear();
       _selectedPeer = null;
-      _isServerConnected = false;
+      _onlinePeers.clear();
     });
-    _initializeWebSocket();
+    _startSession();
   }
 
   Widget _buildMainContentSection() {
-    final bool isSavedMessagesChat =
-        _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+    final bool isSavedMessagesChat = _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     if (_selectedPeer == null) {
-      return const Expanded(
-        child: Center(
-          child: Text(
-            'No Chat Selected',
-            style: TextStyle(color: Colors.white30),
-          ),
-        ),
-      );
+      return const Expanded(child: Center(child: Text('No Chat Selected', style: TextStyle(color: Colors.white30))));
     }
 
     return Expanded(
@@ -872,52 +533,29 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               height: 73,
               child: Center(
                 child: ListTile(
-                  title: Text(
-                    _selectedPeer!.nickname,
-                    style: const TextStyle(
-                      color: Colors.tealAccent,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  subtitle: Text(
-                    isSavedMessagesChat
-                        ? 'Save messages here via the right-click / hold menu.'
-                        : 'Target: ${_selectedPeer!.shortId}',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontFamily: 'monospace',
-                    ),
-                  ),
+                  title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)),
+                  subtitle: Text(isSavedMessagesChat ? 'Save messages here via the right-click / hold menu.' : 'Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
                 ),
               ),
             ),
             const RoundedDivider(),
-            SizedBox(height: 5),
+            const SizedBox(height: 5),
             Expanded(
               child: NotificationListener<ScrollNotification>(
                 onNotification: (scrollInfo) {
-                  final isAtBottom =
-                      scrollInfo.metrics.pixels >=
-                      (scrollInfo.metrics.maxScrollExtent - 20);
+                  final isAtBottom = scrollInfo.metrics.pixels >= (scrollInfo.metrics.maxScrollExtent - 20);
                   if (isAtBottom && !_autoScroll) {
                     _autoScroll = true;
                     _checkAndSendPendingReceipts();
-                  } else if (!isAtBottom &&
-                      _autoScroll &&
-                      scrollInfo is ScrollUpdateNotification &&
-                      scrollInfo.dragDetails != null) {
-                    setState(() {
-                      _autoScroll = false;
-                    });
+                  } else if (!isAtBottom && _autoScroll && scrollInfo is ScrollUpdateNotification && scrollInfo.dragDetails != null) {
+                    setState(() { _autoScroll = false; });
                   }
                   return true;
                 },
                 child: ListView(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(24),
-                  children: _selectedPeer!.messages
-                      .map((m) => _buildMessageBubble(m))
-                      .toList(),
+                  children: _selectedPeer!.messages.map((m) => _buildMessageBubble(m)).toList(),
                 ),
               ),
             ),
@@ -929,12 +567,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   Widget _buildMessageBubble(ChatMessage m) {
-    final String timeString =
-        "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
+    final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
     TapDownDetails? tapDetails;
-
-    final bool isSavedMessagesChat =
-        _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+    final bool isSavedMessagesChat = _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     return Align(
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -944,18 +579,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         duration: const Duration(milliseconds: 800),
         curve: Curves.easeOutCubic,
         builder: (context, value, child) {
-          return Opacity(
-            opacity: value,
-            child: Transform.translate(
-              offset: Offset(0, 20 * (1.0 - value)),
-              child: child,
-            ),
-          );
+          return Opacity(opacity: value, child: Transform.translate(offset: Offset(0, 20 * (1.0 - value)), child: child));
         },
         child: Column(
-          crossAxisAlignment: m.isMe
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.start,
+          crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             GestureDetector(
               onTapDown: (details) => tapDetails = details,
@@ -964,46 +591,30 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 _showDynamicContextMenu(context, tapDetails!, m);
               },
               onLongPress: () {
-                if (tapDetails != null) {
-                  _showDynamicContextMenu(context, tapDetails!, m);
-                }
+                if (tapDetails != null) _showDynamicContextMenu(context, tapDetails!, m);
               },
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: m.isMe
-                      ? const Color(0xFF0B0B0B)
-                      : const Color(0xFF1E1E1E),
+                  color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E),
                   borderRadius: BorderRadius.circular(12),
-                  border: m.isMe
-                      ? Border.all(color: Colors.white10, width: 0.5)
-                      : null,
+                  border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null,
                 ),
                 child: MarkdownBody(
                   data: m.text,
                   selectable: false,
-                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
-                      .copyWith(
-                        p: const TextStyle(color: Colors.white, fontSize: 14),
-                        code: const TextStyle(
-                          backgroundColor: Colors.black26,
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          color: Colors.tealAccent,
-                        ),
-                      ),
+                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                    p: const TextStyle(color: Colors.white, fontSize: 14),
+                    code: const TextStyle(backgroundColor: Colors.black26, fontFamily: 'monospace', fontSize: 12, color: Colors.tealAccent),
+                  ),
                 ),
               ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               child: Text(
-                isSavedMessagesChat
-                    ? timeString
-                    : (m.isMe
-                          ? "$timeString ${m.isRead ? '✓✓' : '✓'}"
-                          : timeString),
+                isSavedMessagesChat ? timeString : (m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString),
                 style: const TextStyle(fontSize: 10, color: Colors.white30),
               ),
             ),
@@ -1018,10 +629,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       padding: const EdgeInsets.all(24.0),
       child: Row(
         children: [
-          IconButton(
-            onPressed: _pickAndSendMedia,
-            icon: Icon(Icons.attach_file_rounded, color: Colors.tealAccent),
-          ),
+          IconButton(onPressed: _pickAndSendMedia, icon: const Icon(Icons.attach_file_rounded, color: Colors.tealAccent)),
           Expanded(
             child: TextField(
               controller: _msgController,
@@ -1032,18 +640,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 hintText: 'Message...',
                 filled: true,
                 fillColor: Color(0xFF1E1E1E),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(12)),
-                  borderSide: BorderSide.none,
-                ),
+                border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none),
               ),
             ),
           ),
           const SizedBox(width: 12),
           FloatingActionButton(
-            backgroundColor: _isMessageEmpty
-                ? Colors.white30
-                : Colors.tealAccent,
+            backgroundColor: _isMessageEmpty ? Colors.white30 : Colors.tealAccent,
             onPressed: _isMessageEmpty ? null : _sendMessage,
             child: const Icon(Icons.send_rounded, color: Colors.black),
           ),
@@ -1052,7 +655,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
-  // --- CUSTOM OVERLAY DRAWER WITH DISMISS LAYER AND POSITIONED SLIDER ANIMATION ---
   Widget _buildAnimatedOverlayDrawer() {
     return Stack(
       children: [
@@ -1062,9 +664,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             onTap: () => setState(() => _isMobileSidebarExpanded = false),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              color: _isMobileSidebarExpanded
-                  ? Colors.black54
-                  : Colors.transparent,
+              color: _isMobileSidebarExpanded ? Colors.black54 : Colors.transparent,
             ),
           ),
         ),
@@ -1077,12 +677,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           child: SafeArea(
             child: Container(
               width: 260,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.only(
-                  topRight: Radius.circular(16),
-                  bottomRight: Radius.circular(16),
-                ),
-                color: const Color(0xFF1A1A1A),
+              decoration: const BoxDecoration(
+                borderRadius: BorderRadius.only(topRight: Radius.circular(16), bottomRight: Radius.circular(16)),
+                color: Color(0xFF1A1A1A),
               ),
               child: ExpandedSidebar(
                 peers: _peers,
@@ -1091,17 +688,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 onSelectPeer: _selectAndLoadPeer,
                 onSettingsPressed: _showSettingsDialog,
                 onAboutPressed: () => Dialogs.showAboutDialog(context: context),
-                onIdentityPressed: () => Dialogs.showIdentityModal(
-                  context: context,
-                  shortId: _myShortId,
-                  rawPublicKey: _myRawPublicKey,
-                ),
-                onAddPeerPressed: () => Dialogs.showAddPeer(
-                  context: context,
-                  nameController: _nameController,
-                  keyInputController: _keyInputController,
-                  onConnect: _handleConnectNewPeer,
-                ),
+                onIdentityPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
+                onAddPeerPressed: () => Dialogs.showAddPeer(context: context, nameController: _nameController, keyInputController: _keyInputController, onConnect: _handleConnectNewPeer),
               ),
             ),
           ),
@@ -1116,14 +704,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    if (!_isServerConnected) {
+    if (!(_sessionManager?.isServerConnected ?? false)) {
       return ConnectionSetupScreen(
         ipController: _ipController,
-        isConnecting: _isConnecting,
+        isConnecting: _sessionManager?.isConnecting ?? false,
         onConnect: () {
           if (_ipController.text.isNotEmpty) {
             setState(() => _serverIp = _ipController.text.trim());
-            _initializeWebSocket();
+            _startSession();
           }
         },
       );
@@ -1141,12 +729,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                   if (!isSmallScreen)
                     Container(
                       width: 260,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.only(
-                          topRight: Radius.circular(16),
-                          bottomRight: Radius.circular(16),
-                        ),
-                        color: const Color(0xFF1A1A1A),
+                      decoration: const BoxDecoration(
+                        borderRadius: BorderRadius.only(topRight: Radius.circular(16), bottomRight: Radius.circular(16)),
+                        color: Color(0xFF1A1A1A),
                       ),
                       child: SafeArea(
                         child: ExpandedSidebar(
@@ -1155,19 +740,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                           onlinePeers: _onlinePeers,
                           onSelectPeer: _selectAndLoadPeer,
                           onSettingsPressed: _showSettingsDialog,
-                          onAboutPressed: () =>
-                              Dialogs.showAboutDialog(context: context),
-                          onIdentityPressed: () => Dialogs.showIdentityModal(
-                            context: context,
-                            shortId: _myShortId,
-                            rawPublicKey: _myRawPublicKey,
-                          ),
-                          onAddPeerPressed: () => Dialogs.showAddPeer(
-                            context: context,
-                            nameController: _nameController,
-                            keyInputController: _keyInputController,
-                            onConnect: _handleConnectNewPeer,
-                          ),
+                          onAboutPressed: () => Dialogs.showAboutDialog(context: context),
+                          onIdentityPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
+                          onAddPeerPressed: () => Dialogs.showAddPeer(context: context, nameController: _nameController, keyInputController: _keyInputController, onConnect: _handleConnectNewPeer),
                         ),
                       ),
                     )
@@ -1177,8 +752,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                       selectedPeer: _selectedPeer,
                       onlinePeers: _onlinePeers,
                       onSelectPeer: _selectAndLoadPeer,
-                      onMenuPressed: () =>
-                          setState(() => _isMobileSidebarExpanded = true),
+                      onMenuPressed: () => setState(() => _isMobileSidebarExpanded = true),
                     ),
                   _buildMainContentSection(),
                 ],
