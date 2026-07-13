@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:crypton/crypton.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'models.dart';
@@ -11,11 +11,10 @@ class ChatSessionManager {
   final String myRawPublicKey;
   final RSAPrivateKey privKey;
   
-  WebSocketChannel? channel;
+  IOWebSocketChannel? channel;
   bool isServerConnected = false;
   bool isConnecting = false;
 
-  // Callbacks to communicate state modifications back to the UI
   final VoidCallback onStateChanged;
   final Function(String senderKey) onFriendRequestReceived;
   final Function(String senderKey, String text, Map<String, dynamic> payload) onMessageReceived;
@@ -39,7 +38,11 @@ class ChatSessionManager {
   });
 
   void initializeWebSocket() async {
-    channel?.sink.close();
+    if (isConnecting) return;
+    
+    // Clean close any trailing pipes explicitly
+    await channel?.sink.close();
+    
     isConnecting = true;
     isServerConnected = false;
     onStateChanged();
@@ -51,7 +54,12 @@ class ChatSessionManager {
               ? "ws://$serverIp"
               : "ws://$serverIp/ws";
 
-      final connectedChannel = WebSocketChannel.connect(Uri.parse(wsUrl));
+      // FIXED: Use IOWebSocketChannel.connect to expose the native pingInterval configuration
+      final connectedChannel = IOWebSocketChannel.connect(
+        Uri.parse(wsUrl),
+        pingInterval: const Duration(seconds: 20),
+      );
+      
       channel = connectedChannel;
       await connectedChannel.ready;
 
@@ -73,6 +81,7 @@ class ChatSessionManager {
       channel!.stream.listen(
         (rawData) => _handleIncomingPacket(rawData.toString()),
         onError: (err) {
+          debugPrint("WebSocket stream encountered an error pipeline condition: $err");
           _handleDisconnect();
         },
         onDone: () {
@@ -80,11 +89,13 @@ class ChatSessionManager {
         },
       );
     } catch (e) {
+      debugPrint("WebSocket initialization failed: $e");
       _handleDisconnect();
     }
   }
 
   void _handleDisconnect() {
+    if (!isServerConnected && !isConnecting) return;
     isServerConnected = false;
     isConnecting = false;
     onStateChanged();
@@ -107,6 +118,7 @@ class ChatSessionManager {
 
       if (packetType == 'status_update') {
         if (senderPublicKey == 'server') {
+          _onlinePeers.clear(); // Flush historical data tracking states
           final List<dynamic> currentOnlineList = jsonDecode(data['payload']);
           _onlinePeers.addAll(currentOnlineList.map((e) => e.toString().trim()));
         } else {
@@ -177,48 +189,60 @@ class ChatSessionManager {
   }
 
   void sendReadReceipt(String targetKey, String messageId) {
-    if (channel == null) return;
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
+    if (channel == null || !isServerConnected) return;
+    try {
+      final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
+      final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
 
-    channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(receiptPayload),
-      }),
-    );
+      channel!.sink.add(
+        jsonEncode({
+          "type": "message",
+          "fromUser": myRawPublicKey,
+          "toUser": targetKey.trim(),
+          "payload": recipientPublicKeyObj.encrypt(receiptPayload),
+        }),
+      );
+    } catch (e) {
+      debugPrint("Failed to serialize read receipt structural packet payload: $e");
+    }
   }
 
   void sendFriendRequest(String targetKey) {
-    if (channel == null) return;
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    final requestPayload = jsonEncode({"isFriendRequest": true});
+    if (channel == null || !isServerConnected) return;
+    try {
+      final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
+      final requestPayload = jsonEncode({"isFriendRequest": true});
 
-    channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(requestPayload),
-      }),
-    );
+      channel!.sink.add(
+        jsonEncode({
+          "type": "message",
+          "fromUser": myRawPublicKey,
+          "toUser": targetKey.trim(),
+          "payload": recipientPublicKeyObj.encrypt(requestPayload),
+        }),
+      );
+    } catch (e) {
+      debugPrint("Failed to encrypt structural friend request packet payload: $e");
+    }
   }
 
   void sendFriendRequestReaction(String targetKey, bool didAccept) {
-    if (channel == null) return;
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-    final requestPayload = jsonEncode({"didAcceptFRequest": didAccept});
+    if (channel == null || !isServerConnected) return;
+    try {
+      final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
+      final requestPayload = jsonEncode({"didAcceptFRequest": didAccept});
 
-    channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": recipientPublicKeyObj.encrypt(requestPayload),
-      }),
-    );
+      channel!.sink.add(
+        jsonEncode({
+          "type": "message",
+          "fromUser": myRawPublicKey,
+          "toUser": targetKey.trim(),
+          "payload": recipientPublicKeyObj.encrypt(requestPayload),
+        }),
+      );
+    } catch (e) {
+      debugPrint("Failed to execute friend selection transmission sequence: $e");
+    }
   }
 
   Future<void> sendChatMessage({
@@ -227,7 +251,7 @@ class ChatSessionManager {
     required String msgId,
     required DateTime timestamp,
   }) async {
-    if (channel == null) return;
+    if (channel == null || !isServerConnected) throw Exception("Network channel unavailable");
 
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
 
@@ -274,7 +298,7 @@ class ChatSessionManager {
     required String fileName,
     required String base64Payload,
   }) async {
-    if (channel == null) return;
+    if (channel == null || !isServerConnected) throw Exception("Network channel unavailable");
 
     final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
 

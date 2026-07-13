@@ -14,7 +14,7 @@ import 'storage_service.dart';
 import 'connection_setup_screen.dart';
 import 'expanded_sidebar.dart';
 import 'compact_sidebar.dart';
-import 'chat_session_manager.dart'; // Make sure to import the manager
+import 'chat_session_manager.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -81,12 +81,30 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+
     setState(() {
       _isWindowInFocus = state == AppLifecycleState.resumed;
     });
 
-    if (_isWindowInFocus && _selectedPeer != null) {
-      _checkAndSendPendingReceipts();
+    // Determine if the current platform is a mobile device
+    final bool isMobile = Platform.isAndroid || Platform.isIOS;
+
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      // ONLY force disconnect on mobile platforms when minimized/suspended
+      if (isMobile) {
+        debugPrint("Mobile backgrounding detected: Securing session pipeline.");
+        _sessionManager?.disconnect();
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      // If we are on mobile and returning from a paused state, re-establish the connection
+      if (isMobile && !(_sessionManager?.isServerConnected ?? false)) {
+        _startSession();
+      }
+      
+      if (_selectedPeer != null) {
+        _checkAndSendPendingReceipts();
+      }
     }
   }
 
@@ -111,6 +129,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     final String? savedIp = await StorageService.fetchServerIp();
 
+    if (!mounted) return;
     setState(() {
       _privKey = kp.privateKey;
       _myRawPublicKey = kp.publicKey.toString().trim();
@@ -132,8 +151,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       myRawPublicKey: _myRawPublicKey,
       privKey: _privKey,
       onStateChanged: () {
-        if (mounted) setState(() {});
+        if (mounted) {
+          setState(() {});
+          // If we just successfully connected/reconnected, flush receipts right away
+          if (_sessionManager?.isServerConnected ?? false) {
+            _checkAndSendPendingReceipts();
+          }
+        }
       },
+      // ADD/RESTORE THIS PARAMETER ARGUMENT HERE:
       onStatusUpdateReceived: (updatedPeers) {
         if (mounted) {
           setState(() {
@@ -143,6 +169,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       },
       onFriendRequestReceived: _processFriendRequest,
       onFriendRequestAccepted: (senderPublicKey) {
+        if (!mounted) return;
         setState(() {
           final peerIndex = _peers.indexWhere(
             (p) => p.rawPublicKey.trim() == senderPublicKey,
@@ -153,7 +180,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         });
         _syncPeersToStorage();
       },
-      onReadReceiptReceived: (senderPublicKey, targetMsgId) {
+      onReadReceiptReceived: (senderPublicKey, targetMsgId) async {
         final cleanedSenderKey = senderPublicKey.trim();
         final peerIndex = _peers.indexWhere((p) => p.rawPublicKey.trim() == cleanedSenderKey);
         if (peerIndex == -1) return;
@@ -162,9 +189,20 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
 
         if (msgIndex != -1) {
-          setState(() {
-            peer.messages[msgIndex].isRead = true;
-          });
+          if (mounted) {
+            setState(() {
+              peer.messages[msgIndex].isRead = true;
+            });
+          }
+          
+          // Persist the read state to the database so it stays updated
+          await StorageService.persistEncryptedMessage(
+            peerPublicKey: cleanedSenderKey,
+            msgId: targetMsgId,
+            encryptedPayload: peer.messages[msgIndex].text,
+            isMe: true, 
+            timestampIso: peer.messages[msgIndex].timestamp.toIso8601String(),
+          );
         }
       },
       onMessageReceived: (senderPublicKey, text, payloadMap) {
@@ -175,7 +213,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     _sessionManager!.initializeWebSocket();
   }
 
-  // --- MEDIA PICKER ---
   Future<void> _pickAndSendMedia() async {
     if (_selectedPeer == null || _sessionManager == null) return;
 
@@ -220,6 +257,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         timestampIso: now.toIso8601String(),
       );
 
+      if (!mounted) return;
       setState(() {
         targetPeer.messages.add(
           ChatMessage(
@@ -248,6 +286,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       context: context,
       senderPublicKey: senderPublicKey,
       onAccept: (nickname) {
+        if (!mounted) return;
         setState(() {
           final newPeer = ChatPeer(rawPublicKey: senderPublicKey, nickname: nickname);
           _peers.add(newPeer);
@@ -285,6 +324,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       timestampIso: sentTime.toIso8601String(),
     );
 
+    if (!mounted) return;
     setState(() {
       final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
       if (!sender.messages.any((m) => m.id == msgId)) {
@@ -319,23 +359,35 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _checkAndSendPendingReceipts() {
-    if (_selectedPeer == null || !_isWindowInFocus || !_autoScroll || _sessionManager == null) return;
-    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) return;
+  // Ensure we have a valid session and an active, non-system peer selected
+  if (_selectedPeer == null || _sessionManager == null) return;
+  if (!_sessionManager!.isServerConnected) return; // Can't send if the socket is down!
+  if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) return;
 
-    bool stateChanged = false;
+  bool stateChanged = false;
 
-    for (var m in _selectedPeer!.messages) {
-      if (!m.isMe && !m.isRead) {
-        _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
-        m.isRead = true;
-        stateChanged = true;
-      }
-    }
-
-    if (stateChanged) {
-      setState(() {});
+  for (var m in _selectedPeer!.messages) {
+    // If it's an incoming message and hasn't been marked read locally yet
+    if (!m.isMe && !m.isRead) {
+      _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
+      m.isRead = true;
+      stateChanged = true;
+      
+      // Update local database history so we don't try to send it again next time
+      StorageService.persistEncryptedMessage(
+        peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
+        msgId: m.id,
+        encryptedPayload: m.text,
+        isMe: false,
+        timestampIso: m.timestamp.toIso8601String(),
+      );
     }
   }
+
+  if (stateChanged && mounted) {
+    setState(() {});
+  }
+}
 
   void _handleConnectNewPeer(String nickname, String key) {
     final String cleanedKey = key.trim();
@@ -364,38 +416,47 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     final text = _msgController.text;
     final newMsg = ChatMessage(text, true);
 
-    await _sessionManager!.sendChatMessage(
-      targetKey: _selectedPeer!.rawPublicKey.trim(),
-      text: text,
-      msgId: newMsg.id,
-      timestamp: newMsg.timestamp,
-    );
+    try {
+      await _sessionManager!.sendChatMessage(
+        targetKey: _selectedPeer!.rawPublicKey.trim(),
+        text: text,
+        msgId: newMsg.id,
+        timestamp: newMsg.timestamp,
+      );
 
-    await StorageService.persistEncryptedMessage(
-      peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
-      msgId: newMsg.id,
-      encryptedPayload: text,
-      isMe: true,
-      timestampIso: newMsg.timestamp.toIso8601String(),
-    );
+      await StorageService.persistEncryptedMessage(
+        peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
+        msgId: newMsg.id,
+        encryptedPayload: text,
+        isMe: true,
+        timestampIso: newMsg.timestamp.toIso8601String(),
+      );
 
-    setState(() {
-      _selectedPeer!.messages.add(newMsg);
-    });
+      if (!mounted) return;
+      setState(() {
+        _selectedPeer!.messages.add(newMsg);
+      });
 
-    _msgController.clear();
-    _scrollToBottom();
-    _msgFocusNode.requestFocus();
+      _msgController.clear();
+      _scrollToBottom();
+      _msgFocusNode.requestFocus();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to deliver message: Connection inactive.')),
+      );
+    }
   }
 
   void _scrollToBottom() {
     if (_autoScroll && _scrollController.hasClients) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+          );
+        }
       });
     }
   }
@@ -403,7 +464,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   void _jumpToBottom() {
     if (_scrollController.hasClients) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        if (_scrollController.hasClients) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        }
       });
     }
   }
@@ -429,6 +492,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       );
     }
 
+    if (!mounted) return;
     setState(() {
       p.messages = loadedMessages;
       _selectedPeer = p;
@@ -473,6 +537,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       ],
       elevation: 8,
     ).then((selectedValue) async {
+      if (!mounted || selectedValue == null) return;
       if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message copied to clipboard'), duration: Duration(seconds: 1)));
@@ -495,6 +560,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       ipController: _ipController,
       onResetIdentity: _resetIdentity,
       onSaveAndConnect: (targetIp) {
+        if (!mounted) return;
         setState(() => _serverIp = targetIp);
         _startSession();
       },
@@ -506,6 +572,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     await StorageService.resetIdentity();
     await StorageService.savePrivateKey(kp.privateKey.toString());
 
+    if (!mounted) return;
     setState(() {
       _privKey = kp.privateKey;
       _myRawPublicKey = kp.publicKey.toString().trim();
@@ -576,10 +643,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       child: TweenAnimationBuilder<double>(
         key: ValueKey(m.id),
         tween: Tween<double>(begin: 0.0, end: 1.0),
-        duration: const Duration(milliseconds: 800),
+        duration: const Duration(milliseconds: 300),
         curve: Curves.easeOutCubic,
         builder: (context, value, child) {
-          return Opacity(opacity: value, child: Transform.translate(offset: Offset(0, 20 * (1.0 - value)), child: child));
+          return Opacity(opacity: value, child: Transform.translate(offset: Offset(0, 10 * (1.0 - value)), child: child));
         },
         child: Column(
           crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
