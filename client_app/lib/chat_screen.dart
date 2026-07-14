@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:crypton/crypton.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'models.dart';
 import 'dialogs.dart';
@@ -90,7 +91,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     // Determine if the current platform is a mobile device
     final bool isMobile = Platform.isAndroid || Platform.isIOS;
 
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
       // ONLY force disconnect on mobile platforms when minimized/suspended
       if (isMobile) {
         debugPrint("Mobile backgrounding detected: Securing session pipeline.");
@@ -101,7 +103,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       if (isMobile && !(_sessionManager?.isServerConnected ?? false)) {
         _startSession();
       }
-      
+
       if (_selectedPeer != null) {
         _checkAndSendPendingReceipts();
       }
@@ -185,7 +187,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       },
       onReadReceiptReceived: (senderPublicKey, targetMsgId) async {
         final cleanedSenderKey = senderPublicKey.trim();
-        final peerIndex = _peers.indexWhere((p) => p.rawPublicKey.trim() == cleanedSenderKey);
+        final peerIndex = _peers.indexWhere(
+          (p) => p.rawPublicKey.trim() == cleanedSenderKey,
+        );
         if (peerIndex == -1) return;
 
         final peer = _peers[peerIndex];
@@ -197,13 +201,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               peer.messages[msgIndex].isRead = true;
             });
           }
-          
+
           // Persist the read state to the database so it stays updated
           await StorageService.persistEncryptedMessage(
             peerPublicKey: cleanedSenderKey,
             msgId: targetMsgId,
             encryptedPayload: peer.messages[msgIndex].text,
-            isMe: true, 
+            isMe: true,
             timestampIso: peer.messages[msgIndex].timestamp.toIso8601String(),
           );
         }
@@ -219,7 +223,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   Future<void> _pickAndSendMedia() async {
     if (_selectedPeer == null || _sessionManager == null) return;
 
-    FilePickerResult? result = await FilePicker.platform.pickFiles(withData: true);
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      withData: true,
+    );
     if (result == null || result.files.isEmpty) return;
 
     final file = result.files.first;
@@ -233,12 +239,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       mediaType = 'audio';
     }
 
-    final Uint8List fileBytes = file.bytes ?? await File(file.path!).readAsBytes();
+    final Uint8List fileBytes =
+        file.bytes ?? await File(file.path!).readAsBytes();
     final String base64Payload = base64Encode(fileBytes);
 
     final targetPeer = _selectedPeer!;
     final cleanedTargetKey = targetPeer.rawPublicKey.trim();
-    final String msgId = "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
+    final String msgId =
+        "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
     final DateTime now = DateTime.now();
 
     try {
@@ -282,7 +290,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _processFriendRequest(String senderPublicKey) {
-    bool peerExists = _peers.any((p) => p.rawPublicKey.trim() == senderPublicKey);
+    bool peerExists = _peers.any(
+      (p) => p.rawPublicKey.trim() == senderPublicKey,
+    );
     if (peerExists) return;
 
     Dialogs.showUnknownPeerDialog(
@@ -291,7 +301,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       onAccept: (nickname) {
         if (!mounted) return;
         setState(() {
-          final newPeer = ChatPeer(rawPublicKey: senderPublicKey, nickname: nickname);
+          final newPeer = ChatPeer(
+            rawPublicKey: senderPublicKey,
+            nickname: nickname,
+          );
           _peers.add(newPeer);
           _selectedPeer ??= newPeer;
         });
@@ -308,7 +321,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     String rawCiphertext,
     Map<String, dynamic> payloadMap,
   ) async {
-    bool peerExists = _peers.any((p) => p.rawPublicKey.trim() == senderPublicKey);
+    bool peerExists = _peers.any(
+      (p) => p.rawPublicKey.trim() == senderPublicKey,
+    );
     if (!peerExists) return;
 
     final String messageText = payloadMap['text'];
@@ -329,7 +344,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     if (!mounted) return;
     setState(() {
-      final sender = _peers.firstWhere((p) => p.rawPublicKey.trim() == senderPublicKey);
+      final sender = _peers.firstWhere(
+        (p) => p.rawPublicKey.trim() == senderPublicKey,
+      );
       if (!sender.messages.any((m) => m.id == msgId)) {
         final newIncomingMsg = ChatMessage(
           messageText,
@@ -341,7 +358,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           base64Data: base64Data,
         );
 
-        final bool isChatOpenAndVisible = _selectedPeer == sender && _isWindowInFocus && _autoScroll;
+        final bool isChatOpenAndVisible =
+            _selectedPeer == sender && _isWindowInFocus && _autoScroll;
 
         if (isChatOpenAndVisible) {
           newIncomingMsg.isRead = true;
@@ -362,35 +380,37 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _checkAndSendPendingReceipts() {
-  // Ensure we have a valid session and an active, non-system peer selected
-  if (_selectedPeer == null || _sessionManager == null) return;
-  if (!_sessionManager!.isServerConnected) return; // Can't send if the socket is down!
-  if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) return;
+    // Ensure we have a valid session and an active, non-system peer selected
+    if (_selectedPeer == null || _sessionManager == null) return;
+    if (!_sessionManager!.isServerConnected)
+      return; // Can't send if the socket is down!
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey)
+      return;
 
-  bool stateChanged = false;
+    bool stateChanged = false;
 
-  for (var m in _selectedPeer!.messages) {
-    // If it's an incoming message and hasn't been marked read locally yet
-    if (!m.isMe && !m.isRead) {
-      _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
-      m.isRead = true;
-      stateChanged = true;
-      
-      // Update local database history so we don't try to send it again next time
-      StorageService.persistEncryptedMessage(
-        peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
-        msgId: m.id,
-        encryptedPayload: m.text,
-        isMe: false,
-        timestampIso: m.timestamp.toIso8601String(),
-      );
+    for (var m in _selectedPeer!.messages) {
+      // If it's an incoming message and hasn't been marked read locally yet
+      if (!m.isMe && !m.isRead) {
+        _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
+        m.isRead = true;
+        stateChanged = true;
+
+        // Update local database history so we don't try to send it again next time
+        StorageService.persistEncryptedMessage(
+          peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
+          msgId: m.id,
+          encryptedPayload: m.text,
+          isMe: false,
+          timestampIso: m.timestamp.toIso8601String(),
+        );
+      }
+    }
+
+    if (stateChanged && mounted) {
+      setState(() {});
     }
   }
-
-  if (stateChanged && mounted) {
-    setState(() {});
-  }
-}
 
   void _handleConnectNewPeer(String nickname, String key) {
     final String cleanedKey = key.trim();
@@ -402,7 +422,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       });
     } else {
       setState(() {
-        final newPeer = ChatPeer(rawPublicKey: cleanedKey, nickname: nickname, isPending: true);
+        final newPeer = ChatPeer(
+          rawPublicKey: cleanedKey,
+          nickname: nickname,
+          isPending: true,
+        );
         _peers.add(newPeer);
         _selectedPeer = newPeer;
       });
@@ -414,7 +438,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _sendMessage() async {
-    if (_msgController.text.isEmpty || _selectedPeer == null || _sessionManager == null) return;
+    if (_msgController.text.isEmpty ||
+        _selectedPeer == null ||
+        _sessionManager == null)
+      return;
 
     final text = _msgController.text;
     final newMsg = ChatMessage(text, true);
@@ -445,7 +472,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _msgFocusNode.requestFocus();
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to deliver message: Connection inactive.')),
+        SnackBar(
+          content: Text('Failed to deliver message: Connection inactive.'),
+        ),
       );
     }
   }
@@ -475,7 +504,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _syncPeersToStorage() async {
-    final serialized = _peers.map((p) => {"nickname": p.nickname, "publicKey": p.rawPublicKey}).toList();
+    final serialized = _peers
+        .map((p) => {"nickname": p.nickname, "publicKey": p.rawPublicKey})
+        .toList();
     await StorageService.savePeerList(serialized);
   }
 
@@ -515,8 +546,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
   }
 
-  void _showDynamicContextMenu(BuildContext context, TapDownDetails details, ChatMessage message) {
-    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  void _showDynamicContextMenu(
+    BuildContext context,
+    TapDownDetails details,
+    ChatMessage message,
+  ) {
+    final RenderBox overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
 
     showMenu(
       context: context,
@@ -527,15 +563,41 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       items: [
         const PopupMenuItem(
           value: 'copy',
-          child: Row(children: [Icon(Icons.copy_rounded, size: 16, color: Colors.white70), SizedBox(width: 10), Text('Copy')]),
+          child: Row(
+            children: [
+              Icon(Icons.copy_rounded, size: 16, color: Colors.white70),
+              SizedBox(width: 10),
+              Text('Copy'),
+            ],
+          ),
         ),
         PopupMenuItem(
           value: 'save',
-          child: Row(children: [Icon(Icons.bookmark_outline_rounded, size: 16, color: Colors.white70), SizedBox(width: 10), Text('Save')]),
+          child: Row(
+            children: [
+              Icon(
+                Icons.bookmark_outline_rounded,
+                size: 16,
+                color: Colors.white70,
+              ),
+              SizedBox(width: 10),
+              Text('Save'),
+            ],
+          ),
         ),
         const PopupMenuItem(
           value: 'delete',
-          child: Row(children: [Icon(Icons.delete_outline_rounded, size: 16, color: Colors.redAccent), SizedBox(width: 10), Text('Delete', style: TextStyle(color: Colors.redAccent))]),
+          child: Row(
+            children: [
+              Icon(
+                Icons.delete_outline_rounded,
+                size: 16,
+                color: Colors.redAccent,
+              ),
+              SizedBox(width: 10),
+              Text('Delete', style: TextStyle(color: Colors.redAccent)),
+            ],
+          ),
         ),
       ],
       elevation: 8,
@@ -543,16 +605,28 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       if (!mounted || selectedValue == null) return;
       if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message copied to clipboard'), duration: Duration(seconds: 1)));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Message copied to clipboard'),
+            duration: Duration(seconds: 1),
+          ),
+        );
       } else if (selectedValue == 'delete') {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Delete clicked (Placeholder active)')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Delete clicked (Placeholder active)')),
+        );
       } else if (selectedValue == 'save') {
         await StorageService.forwardToSavedMessages(
           msgId: DateTime.now().millisecondsSinceEpoch.toString(),
           encryptedPayload: message.text,
           timestampIso: DateTime.now().toIso8601String(),
         );
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Message saved'), duration: Duration(seconds: 1)));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Message saved'),
+            duration: Duration(seconds: 1),
+          ),
+        );
       }
     });
   }
@@ -589,10 +663,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   Widget _buildMainContentSection(BuildContext context) {
     final ThemeData theme = Theme.of(context);
-    final bool isSavedMessagesChat = _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+    final bool isSavedMessagesChat =
+        _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     if (_selectedPeer == null) {
-      return const Expanded(child: Center(child: Text('No Chat Selected', style: TextStyle(color: Colors.white30))));
+      return const Expanded(
+        child: Center(
+          child: Text(
+            'No Chat Selected',
+            style: TextStyle(color: Colors.white30),
+          ),
+        ),
+      );
     }
 
     return Expanded(
@@ -604,8 +686,22 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               height: 73,
               child: Center(
                 child: ListTile(
-                  title: Text(_selectedPeer!.nickname, style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold)),
-                  subtitle: Text(isSavedMessagesChat ? 'Save messages here via the right-click / hold menu.' : 'Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+                  title: Text(
+                    _selectedPeer!.nickname,
+                    style: TextStyle(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  subtitle: Text(
+                    isSavedMessagesChat
+                        ? 'Save messages here via the right-click / hold menu.'
+                        : 'Target: ${_selectedPeer!.shortId}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -614,19 +710,28 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             Expanded(
               child: NotificationListener<ScrollNotification>(
                 onNotification: (scrollInfo) {
-                  final isAtBottom = scrollInfo.metrics.pixels >= (scrollInfo.metrics.maxScrollExtent - 20);
+                  final isAtBottom =
+                      scrollInfo.metrics.pixels >=
+                      (scrollInfo.metrics.maxScrollExtent - 20);
                   if (isAtBottom && !_autoScroll) {
                     _autoScroll = true;
                     _checkAndSendPendingReceipts();
-                  } else if (!isAtBottom && _autoScroll && scrollInfo is ScrollUpdateNotification && scrollInfo.dragDetails != null) {
-                    setState(() { _autoScroll = false; });
+                  } else if (!isAtBottom &&
+                      _autoScroll &&
+                      scrollInfo is ScrollUpdateNotification &&
+                      scrollInfo.dragDetails != null) {
+                    setState(() {
+                      _autoScroll = false;
+                    });
                   }
                   return true;
                 },
                 child: ListView(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(24),
-                  children: _selectedPeer!.messages.map((m) => _buildMessageBubble(m, context)).toList(),
+                  children: _selectedPeer!.messages
+                      .map((m) => _buildMessageBubble(m, context))
+                      .toList(),
                 ),
               ),
             ),
@@ -639,9 +744,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   Widget _buildMessageBubble(ChatMessage m, BuildContext) {
     final ThemeData theme = Theme.of(context);
-    final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
+    final String timeString =
+        "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
     TapDownDetails? tapDetails;
-    final bool isSavedMessagesChat = _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+    final bool isSavedMessagesChat =
+        _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     return Align(
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -651,10 +758,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeOutCubic,
         builder: (context, value, child) {
-          return Opacity(opacity: value, child: Transform.translate(offset: Offset(0, 10 * (1.0 - value)), child: child));
+          return Opacity(
+            opacity: value,
+            child: Transform.translate(
+              offset: Offset(0, 10 * (1.0 - value)),
+              child: child,
+            ),
+          );
         },
         child: Column(
-          crossAxisAlignment: m.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          crossAxisAlignment: m.isMe
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
           children: [
             GestureDetector(
               onTapDown: (details) => tapDetails = details,
@@ -663,23 +778,52 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 _showDynamicContextMenu(context, tapDetails!, m);
               },
               onLongPress: () {
-                if (tapDetails != null) _showDynamicContextMenu(context, tapDetails!, m);
+                if (tapDetails != null)
+                  _showDynamicContextMenu(context, tapDetails!, m);
               },
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: m.isMe ? const Color(0xFF0B0B0B) : const Color(0xFF1E1E1E),
+                  color: m.isMe
+                      ? const Color(0xFF0B0B0B)
+                      : const Color(0xFF1E1E1E),
                   borderRadius: BorderRadius.circular(12),
-                  border: m.isMe ? Border.all(color: Colors.white10, width: 0.5) : null,
+                  border: m.isMe
+                      ? Border.all(color: Colors.white10, width: 0.5)
+                      : null,
                 ),
                 child: MarkdownBody(
                   data: m.text,
                   selectable: false,
-                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-                    p: const TextStyle(color: Colors.white, fontSize: 14),
-                    code: TextStyle(backgroundColor: Colors.black26, fontFamily: 'monospace', fontSize: 12, color: theme.colorScheme.primary),
-                  ),
+                  onTapLink: (text, href, title) async {
+                    if (href != null) {
+                      final Uri url = Uri.parse(href);
+                      if (await canLaunchUrl(url)) {
+                        await launchUrl(
+                          url,
+                          mode: LaunchMode.externalApplication,
+                        );
+                      } else {
+                        debugPrint('Could not launch link: $href');
+                      }
+                    }
+                  },
+                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                      .copyWith(
+                        p: const TextStyle(color: Colors.white, fontSize: 14),
+                        code: TextStyle(
+                          backgroundColor: Colors.black26,
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: theme.colorScheme.primary,
+                        ),
+                        blockquoteDecoration: BoxDecoration(
+                          color: const Color.fromARGB(66, 90, 90, 90),
+                          borderRadius: BorderRadius.all(Radius.circular(10)),
+                        ),
+                        a: TextStyle(color: theme.colorScheme.primary),
+                      ),
                 ),
               ),
             ),
@@ -688,8 +832,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(timeString, style: TextStyle(color: Colors.white30, fontSize: 11)),
-                  
+                  Text(
+                    timeString,
+                    style: TextStyle(color: Colors.white30, fontSize: 11),
+                  ),
+
                   // Replace the string tick logic with this widget block:
                   if (!isSavedMessagesChat && m.isMe)
                     Padding(
@@ -697,7 +844,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                       child: Icon(
                         m.isRead ? Icons.circle : Icons.radio_button_unchecked,
                         size: 7,
-                        color: m.isRead ? theme.colorScheme.primary : Colors.white24,
+                        color: m.isRead
+                            ? theme.colorScheme.primary
+                            : Colors.white24,
                       ),
                     ),
                 ],
@@ -715,7 +864,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       padding: const EdgeInsets.all(24.0),
       child: Row(
         children: [
-          IconButton(onPressed: _pickAndSendMedia, icon: Icon(Icons.attach_file_rounded, color: theme.colorScheme.primary)),
+          IconButton(
+            onPressed: _pickAndSendMedia,
+            icon: Icon(
+              Icons.attach_file_rounded,
+              color: theme.colorScheme.primary,
+            ),
+          ),
           Expanded(
             child: TextField(
               controller: _msgController,
@@ -726,13 +881,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 hintText: 'Message...',
                 filled: true,
                 fillColor: Color(0xFF1E1E1E),
-                border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12)), borderSide: BorderSide.none),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.all(Radius.circular(12)),
+                  borderSide: BorderSide.none,
+                ),
               ),
             ),
           ),
           const SizedBox(width: 12),
           FloatingActionButton(
-            backgroundColor: _isMessageEmpty ? Colors.white30 : theme.colorScheme.primary,
+            backgroundColor: _isMessageEmpty
+                ? Colors.white30
+                : theme.colorScheme.primary,
             onPressed: _isMessageEmpty ? null : _sendMessage,
             child: const Icon(Icons.send_rounded, color: Colors.black),
           ),
@@ -750,7 +910,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             onTap: () => setState(() => _isMobileSidebarExpanded = false),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              color: _isMobileSidebarExpanded ? Colors.black54 : Colors.transparent,
+              color: _isMobileSidebarExpanded
+                  ? Colors.black54
+                  : Colors.transparent,
             ),
           ),
         ),
@@ -764,7 +926,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             child: Container(
               width: 260,
               decoration: const BoxDecoration(
-                borderRadius: BorderRadius.only(topRight: Radius.circular(16), bottomRight: Radius.circular(16)),
+                borderRadius: BorderRadius.only(
+                  topRight: Radius.circular(16),
+                  bottomRight: Radius.circular(16),
+                ),
                 color: Color(0xFF1A1A1A),
               ),
               child: ExpandedSidebar(
@@ -774,8 +939,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 onSelectPeer: _selectAndLoadPeer,
                 onSettingsPressed: _showSettingsDialog,
                 onAboutPressed: () => Dialogs.showAboutDialog(context: context),
-                onIdentityPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
-                onAddPeerPressed: () => Dialogs.showAddPeer(context: context, nameController: _nameController, keyInputController: _keyInputController, onConnect: _handleConnectNewPeer),
+                onIdentityPressed: () => Dialogs.showIdentityModal(
+                  context: context,
+                  shortId: _myShortId,
+                  rawPublicKey: _myRawPublicKey,
+                ),
+                onAddPeerPressed: () => Dialogs.showAddPeer(
+                  context: context,
+                  nameController: _nameController,
+                  keyInputController: _keyInputController,
+                  onConnect: _handleConnectNewPeer,
+                ),
               ),
             ),
           ),
@@ -816,7 +990,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                     Container(
                       width: 260,
                       decoration: const BoxDecoration(
-                        borderRadius: BorderRadius.only(topRight: Radius.circular(16), bottomRight: Radius.circular(16)),
+                        borderRadius: BorderRadius.only(
+                          topRight: Radius.circular(16),
+                          bottomRight: Radius.circular(16),
+                        ),
                         color: Color(0xFF1A1A1A),
                       ),
                       child: SafeArea(
@@ -826,9 +1003,19 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                           onlinePeers: _onlinePeers,
                           onSelectPeer: _selectAndLoadPeer,
                           onSettingsPressed: _showSettingsDialog,
-                          onAboutPressed: () => Dialogs.showAboutDialog(context: context),
-                          onIdentityPressed: () => Dialogs.showIdentityModal(context: context, shortId: _myShortId, rawPublicKey: _myRawPublicKey),
-                          onAddPeerPressed: () => Dialogs.showAddPeer(context: context, nameController: _nameController, keyInputController: _keyInputController, onConnect: _handleConnectNewPeer),
+                          onAboutPressed: () =>
+                              Dialogs.showAboutDialog(context: context),
+                          onIdentityPressed: () => Dialogs.showIdentityModal(
+                            context: context,
+                            shortId: _myShortId,
+                            rawPublicKey: _myRawPublicKey,
+                          ),
+                          onAddPeerPressed: () => Dialogs.showAddPeer(
+                            context: context,
+                            nameController: _nameController,
+                            keyInputController: _keyInputController,
+                            onConnect: _handleConnectNewPeer,
+                          ),
                         ),
                       ),
                     )
@@ -838,7 +1025,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                       selectedPeer: _selectedPeer,
                       onlinePeers: _onlinePeers,
                       onSelectPeer: _selectAndLoadPeer,
-                      onMenuPressed: () => setState(() => _isMobileSidebarExpanded = true),
+                      onMenuPressed: () =>
+                          setState(() => _isMobileSidebarExpanded = true),
                     ),
                   _buildMainContentSection(context),
                 ],
