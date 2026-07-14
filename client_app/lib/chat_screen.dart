@@ -495,11 +495,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   void _jumpToBottom() {
     if (_scrollController.hasClients) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-        }
-      });
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
     }
   }
 
@@ -534,7 +530,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _autoScroll = true;
     });
 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
     _jumpToBottom();
+  });
 
     if (p.rawPublicKey == StorageService.savedMessagesPeerKey) return;
 
@@ -728,6 +726,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 },
                 child: ListView(
                   controller: _scrollController,
+                  physics: const BouncingScrollPhysics(
+                    parent: AlwaysScrollableScrollPhysics(),
+                  ),
                   padding: const EdgeInsets.all(24),
                   children: _selectedPeer!.messages
                       .map((m) => _buildMessageBubble(m, context))
