@@ -155,10 +155,12 @@ class Dialogs {
           children: [
             const Text("Version: dev"),
             const SizedBox(height: 8),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 const Text('Developer:'),
-                const SizedBox(width: 8),
                 SizedBox(
                   height: 30,
                   child: OutlinedButton.icon(
@@ -186,10 +188,12 @@ class Dialogs {
               ],
             ),
             const SizedBox(height: 8),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 const Text('App Repo:'),
-                const SizedBox(width: 8),
                 SizedBox(
                   height: 30,
                   child: OutlinedButton.icon(
@@ -309,12 +313,17 @@ class Dialogs {
           children: [
             const Text('My Identity', style: TextStyle(fontSize: 16)),
             const Spacer(),
-            Text(
-              'Short-ID: $shortId',
-              style: TextStyle(
-                fontSize: 12,
-                color: theme.colorScheme.primary,
-                fontFamily: 'monospace',
+            Flexible(
+              child: Text(
+                'Short-ID: $shortId',
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+                textAlign: TextAlign.end,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: theme.colorScheme.primary,
+                  fontFamily: 'monospace',
+                ),
               ),
             ),
           ],
