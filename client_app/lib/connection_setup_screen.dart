@@ -55,7 +55,7 @@ class ConnectionSetupScreen extends StatelessWidget {
               const SizedBox(height: 24),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.tealAccent,
+                  backgroundColor: theme.colorScheme.primary,
                   foregroundColor: Colors.black,
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
