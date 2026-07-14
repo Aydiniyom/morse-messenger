@@ -12,13 +12,21 @@ Future<void> main() async {
   // StorageService throws when it can't set up encrypted storage, so we need
   // somewhere for that to go.
   String? startupError;
+  bool savedUseSystemColor = false;
   try {
     await StorageService.initDatabase();
+
+    final savedVal = await StorageService.fetchColorsToggle();
+    if (savedVal != null) {
+      savedUseSystemColor = savedVal == 'true';
+    }
   } catch (e) {
     debugPrint('Fatal: failed to initialize local storage: $e');
     startupError =
         'Could not initialize secure local storage. Please restart the app.';
   }
+
+  useSystemColorNotifier.value = savedUseSystemColor;
 
   try {
     await NotificationService.initialize();

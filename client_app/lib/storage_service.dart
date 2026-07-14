@@ -13,7 +13,8 @@ class StorageException implements Exception {
   const StorageException(this.message, [this.cause]);
 
   @override
-  String toString() => 'StorageException: $message${cause != null ? ' ($cause)' : ''}';
+  String toString() =>
+      'StorageException: $message${cause != null ? ' ($cause)' : ''}';
 }
 
 class StorageService {
@@ -28,6 +29,7 @@ class StorageService {
   // --- HIVE KEYS ---
   static const _keyName = 'dec_chat_private_key';
   static const _serverIpKey = 'saved_websocket_server_ip';
+  static const _colorsToggle = 'saved_colors_toggle';
   static const _peerListKey = 'saved_chat_peers_list';
   static const String savedMessagesPeerKey = '__SYSTEM_SAVED_MESSAGES__';
   static const String _savedMessagesDataKey = 'persistent_saved_messages_json';
@@ -93,7 +95,10 @@ class StorageService {
           encryptionCipher: HiveAesCipher(encryptionKey),
         );
       } catch (e2) {
-        throw StorageException('Failed to recreate "$name" box after corruption', e2);
+        throw StorageException(
+          'Failed to recreate "$name" box after corruption',
+          e2,
+        );
       }
     }
   }
@@ -117,7 +122,9 @@ class StorageService {
   }
 
   // --- PEER PROFILE CONTACT INDEXES ---
-  static Future<void> savePeerList(List<Map<String, String>> serializedPeers) async {
+  static Future<void> savePeerList(
+    List<Map<String, String>> serializedPeers,
+  ) async {
     try {
       final box = await _getIdentityBox();
       await box.put(_peerListKey, jsonEncode(serializedPeers));
@@ -180,7 +187,9 @@ class StorageService {
     }
   }
 
-  static Future<List<Map<String, dynamic>>> fetchHistory(String peerPublicKey) async {
+  static Future<List<Map<String, dynamic>>> fetchHistory(
+    String peerPublicKey,
+  ) async {
     try {
       final box = await _getHistoryBox();
       final hiveSafeKey = _toBoxKey(peerPublicKey);
@@ -191,11 +200,17 @@ class StorageService {
     }
   }
 
-  static Future<List<Map<String, dynamic>>> _readMessageList(Box box, String key) async {
+  static Future<List<Map<String, dynamic>>> _readMessageList(
+    Box box,
+    String key,
+  ) async {
     final String rawJsonString = box.get(key, defaultValue: '[]');
     final decoded = jsonDecode(rawJsonString);
     if (decoded is! List) return [];
-    return decoded.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+    return decoded
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
   }
 
   // --- SERVER IP SETTINGS PERSISTENCE (UNENCRYPTED / PERSISTENT) ---
@@ -214,6 +229,26 @@ class StorageService {
       return box.get(_serverIpKey) as String?;
     } catch (e) {
       debugPrint('Failed to read server address: $e');
+      return null;
+    }
+  }
+
+  // --- COLORS TOGGLE PERSISTENCE (UNENCRYPTED / PERSISTENT) ---
+  static Future<void> saveColorsToggle(bool value) async {
+    try {
+      final box = _getSettingsBox();
+      await box.put(_colorsToggle, value.toString());
+    } catch (e) {
+      debugPrint('Failed to write colors toggle: $e');
+    }
+  }
+
+  static Future<String?> fetchColorsToggle() async {
+    try {
+      final box = _getSettingsBox();
+      return box.get(_colorsToggle) as String?;
+    } catch (e) {
+      debugPrint('Failed to read colors toggle: $e');
       return null;
     }
   }
@@ -260,10 +295,16 @@ class StorageService {
   static List<Map<String, dynamic>> fetchSavedMessages() {
     try {
       final box = _getSettingsBox();
-      final String rawJsonString = box.get(_savedMessagesDataKey, defaultValue: '[]');
+      final String rawJsonString = box.get(
+        _savedMessagesDataKey,
+        defaultValue: '[]',
+      );
       final decoded = jsonDecode(rawJsonString);
       if (decoded is! List) return [];
-      return decoded.whereType<Map>().map((item) => Map<String, dynamic>.from(item)).toList();
+      return decoded
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
     } catch (e) {
       debugPrint('Failed to read saved messages: $e');
       return [];

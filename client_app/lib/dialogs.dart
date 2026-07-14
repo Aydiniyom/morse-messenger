@@ -1,5 +1,6 @@
 import 'package:client_app/main.dart';
 import 'package:client_app/rounded_divider.dart';
+import 'package:client_app/storage_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -43,8 +44,12 @@ class Dialogs {
                   activeThumbColor: Theme.of(context).colorScheme.primary,
                   value: useSystemColorNotifier.value,
                   onChanged: (bool value) {
-                    setInnerState(() {
+                    setInnerState(() {});
+
+                    Future.delayed(const Duration(milliseconds: 150), () async {
                       useSystemColorNotifier.value = value;
+
+                      await StorageService.saveColorsToggle(true);
                     });
                   },
                 );
@@ -271,7 +276,9 @@ class Dialogs {
             ),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: theme.colorScheme.primary),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+            ),
             onPressed: () {
               if (incomingNameController.text.isNotEmpty) {
                 onAccept(incomingNameController.text.trim());
@@ -336,7 +343,9 @@ class Dialogs {
             child: const Text('Close'),
           ),
           ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(backgroundColor: theme.colorScheme.primary),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+            ),
             icon: const Icon(Icons.copy, size: 16, color: Colors.black),
             label: const Text(
               'Copy Identity',
@@ -423,7 +432,9 @@ class Dialogs {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: theme.colorScheme.primary),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+            ),
             onPressed: () {
               if (keyInputController.text.isNotEmpty &&
                   nameController.text.isNotEmpty) {
