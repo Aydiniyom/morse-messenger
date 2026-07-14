@@ -95,6 +95,14 @@ flutter:
   #       - asset: fonts/TrajanPro.ttf
   #       - asset: fonts/TrajanPro_Bold.ttf
   #         weight: 700
+  fonts:
+    - family: Geomini
+      fonts:
+        - asset: assets/fonts/Geomini/Geomini-VariableFont_wght.ttf
+
+    - family: Vazirmatn
+      fonts:
+        - asset: assets/fonts/Vazirmatn/Vazirmatn-VariableFont_wght.ttf
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package

@@ -683,9 +683,22 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              child: Text(
-                isSavedMessagesChat ? timeString : (m.isMe ? "$timeString ${m.isRead ? '✓✓' : '✓'}" : timeString),
-                style: const TextStyle(fontSize: 10, color: Colors.white30),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(timeString, style: TextStyle(color: Colors.white30, fontSize: 11)),
+                  
+                  // Replace the string tick logic with this widget block:
+                  if (!isSavedMessagesChat && m.isMe)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6.0),
+                      child: Icon(
+                        m.isRead ? Icons.circle : Icons.radio_button_unchecked,
+                        size: 7,
+                        color: m.isRead ? Colors.tealAccent : Colors.white24,
+                      ),
+                    ),
+                ],
               ),
             ),
           ],

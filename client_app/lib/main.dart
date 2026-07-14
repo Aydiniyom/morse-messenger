@@ -45,6 +45,13 @@ class MyApp extends StatelessWidget {
         brightness: Brightness.dark,
         scaffoldBackgroundColor: darkBackground,
 
+        fontFamily: 'Geomini',
+        fontFamilyFallback: ['Vazirmatn'],
+        textTheme: ThemeData.dark().textTheme.apply(
+          fontFamily: 'Geomini',
+          fontFamilyFallback: ['Vazirmatn'],
+        ),
+
         colorScheme: ColorScheme.dark(
           primary: teal,
           onPrimary: Colors.black,
