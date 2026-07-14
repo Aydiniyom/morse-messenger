@@ -1,3 +1,4 @@
+import 'package:client_app/main.dart';
 import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -27,6 +28,27 @@ class Dialogs {
                 hintText: "e.g. 192.168.1.50:8080",
                 labelText: "Server Address",
               ),
+            ),
+
+            const SizedBox(height: 16),
+            const RoundedDivider(),
+            const SizedBox(height: 16),
+
+            // SYSTEM COLOR TOGGLE
+            StatefulBuilder(
+              builder: (context, setInnerState) {
+                return SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Use System Colors'),
+                  activeThumbColor: Theme.of(context).colorScheme.primary,
+                  value: useSystemColorNotifier.value,
+                  onChanged: (bool value) {
+                    setInnerState(() {
+                      useSystemColorNotifier.value = value;
+                    });
+                  },
+                );
+              },
             ),
 
             const SizedBox(height: 16),
@@ -114,6 +136,7 @@ class Dialogs {
   }
 
   static void showAboutDialog({required BuildContext context}) {
+    final ThemeData theme = Theme.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -126,18 +149,16 @@ class Dialogs {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text("Version: dev"),
-            const SizedBox(height: 8,),
+            const SizedBox(height: 8),
             Row(
               children: [
-                const Text(
-                  'Developer:',
-                ),
-                const SizedBox(width: 8,),
+                const Text('Developer:'),
+                const SizedBox(width: 8),
                 SizedBox(
                   height: 30,
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.tealAccent,
+                      foregroundColor: theme.colorScheme.primary,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -156,21 +177,19 @@ class Dialogs {
                     label: const Text('@aydiniyom'),
                     icon: const Icon(Icons.link, size: 16),
                   ),
-                )
+                ),
               ],
             ),
-            const SizedBox(height: 8,),
+            const SizedBox(height: 8),
             Row(
               children: [
-                const Text(
-                  'App Repo:',
-                ),
-                const SizedBox(width: 8,),
+                const Text('App Repo:'),
+                const SizedBox(width: 8),
                 SizedBox(
                   height: 30,
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.tealAccent,
+                      foregroundColor: theme.colorScheme.primary,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -180,7 +199,9 @@ class Dialogs {
                     ),
                     onPressed: () {
                       Clipboard.setData(
-                        ClipboardData(text: "https://github.com/aydiniyom/morse-messenger"),
+                        ClipboardData(
+                          text: "https://github.com/aydiniyom/morse-messenger",
+                        ),
                       );
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(content: Text('Copied GitHub link!')),
@@ -209,6 +230,7 @@ class Dialogs {
     required String senderPublicKey,
     required Function(String nickname) onAccept,
   }) {
+    final ThemeData theme = Theme.of(context);
     final TextEditingController incomingNameController =
         TextEditingController();
     final shortSenderId = senderPublicKey.substring(
@@ -220,9 +242,9 @@ class Dialogs {
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E1E1E),
-        title: const Text(
+        title: Text(
           'Incoming Message Request',
-          style: TextStyle(color: Colors.tealAccent),
+          style: TextStyle(color: theme.colorScheme.primary),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -249,12 +271,10 @@ class Dialogs {
             ),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+            style: ElevatedButton.styleFrom(backgroundColor: theme.colorScheme.primary),
             onPressed: () {
               if (incomingNameController.text.isNotEmpty) {
-                onAccept(
-                  incomingNameController.text.trim(),
-                );
+                onAccept(incomingNameController.text.trim());
                 Navigator.pop(ctx);
               }
             },
@@ -273,6 +293,7 @@ class Dialogs {
     required String shortId,
     required String rawPublicKey,
   }) {
+    final ThemeData theme = Theme.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -283,9 +304,9 @@ class Dialogs {
             const Spacer(),
             Text(
               'Short-ID: $shortId',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12,
-                color: Colors.tealAccent,
+                color: theme.colorScheme.primary,
                 fontFamily: 'monospace',
               ),
             ),
@@ -315,7 +336,7 @@ class Dialogs {
             child: const Text('Close'),
           ),
           ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+            style: ElevatedButton.styleFrom(backgroundColor: theme.colorScheme.primary),
             icon: const Icon(Icons.copy, size: 16, color: Colors.black),
             label: const Text(
               'Copy Identity',
@@ -342,6 +363,7 @@ class Dialogs {
     required TextEditingController keyInputController,
     required Function(String nickname, String key) onConnect,
   }) {
+    final ThemeData theme = Theme.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -372,7 +394,7 @@ class Dialogs {
                   height: 48,
                   child: IconButton.outlined(
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.tealAccent,
+                      foregroundColor: theme.colorScheme.primary,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -401,7 +423,7 @@ class Dialogs {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent),
+            style: ElevatedButton.styleFrom(backgroundColor: theme.colorScheme.primary),
             onPressed: () {
               if (keyInputController.text.isNotEmpty &&
                   nameController.text.isNotEmpty) {

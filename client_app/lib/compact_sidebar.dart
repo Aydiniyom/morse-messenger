@@ -56,7 +56,7 @@ class CompactSidebar extends StatelessWidget {
                   _buildSavedMessagesTile(context),
                   ...peers
                     .map((p) => _buildMobileAvatarButton(context, p))
-                    .toList(),  
+                    ,  
                 ]
               ),
             ),
@@ -128,7 +128,7 @@ class CompactSidebar extends StatelessWidget {
                 width: 12,
                 height: 12,
                 decoration: BoxDecoration(
-                  color: isOnline ? Colors.greenAccent : Colors.blueGrey,
+                  color: isOnline ? theme.colorScheme.primary : Color.fromARGB(255, 66, 66, 66),
                   shape: BoxShape.circle,
                   border: Border.all(color: baseIndicatorColor, width: 2),
                 ),

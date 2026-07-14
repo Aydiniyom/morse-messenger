@@ -587,7 +587,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     _startSession();
   }
 
-  Widget _buildMainContentSection() {
+  Widget _buildMainContentSection(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     final bool isSavedMessagesChat = _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     if (_selectedPeer == null) {
@@ -603,7 +604,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               height: 73,
               child: Center(
                 child: ListTile(
-                  title: Text(_selectedPeer!.nickname, style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)),
+                  title: Text(_selectedPeer!.nickname, style: TextStyle(color: theme.colorScheme.primary, fontWeight: FontWeight.bold)),
                   subtitle: Text(isSavedMessagesChat ? 'Save messages here via the right-click / hold menu.' : 'Target: ${_selectedPeer!.shortId}', style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
                 ),
               ),
@@ -625,18 +626,19 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 child: ListView(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(24),
-                  children: _selectedPeer!.messages.map((m) => _buildMessageBubble(m)).toList(),
+                  children: _selectedPeer!.messages.map((m) => _buildMessageBubble(m, context)).toList(),
                 ),
               ),
             ),
-            _buildMessageInputField(),
+            _buildMessageInputField(context),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildMessageBubble(ChatMessage m) {
+  Widget _buildMessageBubble(ChatMessage m, BuildContext) {
+    final ThemeData theme = Theme.of(context);
     final String timeString = "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
     TapDownDetails? tapDetails;
     final bool isSavedMessagesChat = _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
@@ -676,7 +678,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                   selectable: false,
                   styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
                     p: const TextStyle(color: Colors.white, fontSize: 14),
-                    code: const TextStyle(backgroundColor: Colors.black26, fontFamily: 'monospace', fontSize: 12, color: Colors.tealAccent),
+                    code: TextStyle(backgroundColor: Colors.black26, fontFamily: 'monospace', fontSize: 12, color: theme.colorScheme.primary),
                   ),
                 ),
               ),
@@ -695,7 +697,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                       child: Icon(
                         m.isRead ? Icons.circle : Icons.radio_button_unchecked,
                         size: 7,
-                        color: m.isRead ? Colors.tealAccent : Colors.white24,
+                        color: m.isRead ? theme.colorScheme.primary : Colors.white24,
                       ),
                     ),
                 ],
@@ -707,12 +709,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
-  Widget _buildMessageInputField() {
+  Widget _buildMessageInputField(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.all(24.0),
       child: Row(
         children: [
-          IconButton(onPressed: _pickAndSendMedia, icon: const Icon(Icons.attach_file_rounded, color: Colors.tealAccent)),
+          IconButton(onPressed: _pickAndSendMedia, icon: Icon(Icons.attach_file_rounded, color: theme.colorScheme.primary)),
           Expanded(
             child: TextField(
               controller: _msgController,
@@ -729,7 +732,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           ),
           const SizedBox(width: 12),
           FloatingActionButton(
-            backgroundColor: _isMessageEmpty ? Colors.white30 : Colors.tealAccent,
+            backgroundColor: _isMessageEmpty ? Colors.white30 : theme.colorScheme.primary,
             onPressed: _isMessageEmpty ? null : _sendMessage,
             child: const Icon(Icons.send_rounded, color: Colors.black),
           ),
@@ -837,7 +840,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                       onSelectPeer: _selectAndLoadPeer,
                       onMenuPressed: () => setState(() => _isMobileSidebarExpanded = true),
                     ),
-                  _buildMainContentSection(),
+                  _buildMainContentSection(context),
                 ],
               ),
               if (isSmallScreen) _buildAnimatedOverlayDrawer(),

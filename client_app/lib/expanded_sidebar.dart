@@ -27,6 +27,7 @@ class ExpandedSidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     return Column(
       children: [
         SizedBox(
@@ -41,7 +42,7 @@ class ExpandedSidebar extends StatelessWidget {
                 ),
               ),
               trailing: IconButton(
-                icon: const Icon(Icons.add, color: Colors.tealAccent),
+                icon: Icon(Icons.add, color: theme.colorScheme.primary),
                 style: IconButton.styleFrom(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadiusGeometry.circular(10),
@@ -59,18 +60,19 @@ class ExpandedSidebar extends StatelessWidget {
           child: ListView(
             padding: const EdgeInsets.symmetric(vertical: 10.0),
             children: [
-              _buildSavedMessagesTile(),
-              ...peers.map((p) => _buildPeerListTile(p)).toList(),
+              _buildSavedMessagesTile(context),
+              ...peers.map((p) => _buildPeerListTile(p, context)),
             ],
           ),
         ),
         const RoundedDivider(),
-        _buildSidebarFooterActions(),
+        _buildSidebarFooterActions(context),
       ],
     );
   }
 
-  Widget _buildSavedMessagesTile() {
+  Widget _buildSavedMessagesTile(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     final bool isSelected =
         selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
@@ -78,10 +80,10 @@ class ExpandedSidebar extends StatelessWidget {
       selected: isSelected,
       selectedTileColor: Colors.white10,
       leading: CircleAvatar(
-        backgroundColor: isSelected ? Colors.tealAccent : Colors.white10,
+        backgroundColor: isSelected ? theme.colorScheme.primary : Colors.white10,
         child: Icon(
           Icons.bookmark_border_outlined,
-          color: isSelected ? Colors.black : Colors.tealAccent,
+          color: isSelected ? Colors.black : theme.colorScheme.primary,
         ),
       ),
       title: Text('Saved Messages'),
@@ -93,7 +95,8 @@ class ExpandedSidebar extends StatelessWidget {
     );
   }
 
-  Widget _buildPeerListTile(ChatPeer p) {
+  Widget _buildPeerListTile(ChatPeer p, BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     final bool isOnline = onlinePeers.contains(p.rawPublicKey.trim());
     final bool isSelected = selectedPeer == p;
 
@@ -103,16 +106,16 @@ class ExpandedSidebar extends StatelessWidget {
       leading: Stack(
         children: [
           CircleAvatar(
-            backgroundColor: isSelected ? Colors.tealAccent : Colors.white10,
+            backgroundColor: isSelected ? theme.colorScheme.primary : Colors.white10,
             child: p.isPending
             ? Icon(
               Icons.access_time,
-              color: isSelected ? Colors.black : Colors.tealAccent,
+              color: isSelected ? Colors.black : theme.colorScheme.primary,
             )
             : Text(
               p.nickname[0].toUpperCase(),
               style: TextStyle(
-                color: isSelected ? Colors.black : Colors.tealAccent,
+                color: isSelected ? Colors.black : theme.colorScheme.primary,
               ),
             ),
           ),
@@ -123,7 +126,7 @@ class ExpandedSidebar extends StatelessWidget {
               width: 12,
               height: 12,
               decoration: BoxDecoration(
-                color: isOnline ? Colors.greenAccent : Colors.blueGrey,
+                color: isOnline ? theme.colorScheme.primary : Color.fromARGB(255, 66, 66, 66),
                 shape: BoxShape.circle,
                 border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
               ),
@@ -142,7 +145,8 @@ class ExpandedSidebar extends StatelessWidget {
     );
   }
 
-  Widget _buildSidebarFooterActions() {
+  Widget _buildSidebarFooterActions(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
       child: Row(
@@ -150,7 +154,7 @@ class ExpandedSidebar extends StatelessWidget {
           Expanded(
             child: OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.tealAccent,
+                foregroundColor: theme.colorScheme.primary,
                 side: const BorderSide(color: Colors.white10),
               ),
               icon: const Icon(Icons.vpn_key, size: 14),
