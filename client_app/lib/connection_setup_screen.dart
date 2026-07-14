@@ -14,6 +14,7 @@ class ConnectionSetupScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
     return Scaffold(
       body: Center(
         child: Container(
@@ -23,10 +24,10 @@ class ConnectionSetupScreen extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(
+              Icon(
                 Icons.waving_hand_rounded,
                 size: 64,
-                color: Colors.tealAccent,
+                color: theme.colorScheme.primary,
               ),
               const SizedBox(height: 24),
               const Text(
