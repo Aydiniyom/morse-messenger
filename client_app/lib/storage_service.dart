@@ -187,6 +187,23 @@ class StorageService {
     }
   }
 
+  /// Removes a single message from a peer's stored history by ID. Safe to
+  /// call even if the message was never persisted (no-op in that case).
+  static Future<void> deleteMessage({
+    required String peerPublicKey,
+    required String msgId,
+  }) async {
+    try {
+      final box = await _getHistoryBox();
+      final hiveSafeKey = _toBoxKey(peerPublicKey);
+      final messageHistory = await _readMessageList(box, hiveSafeKey);
+      messageHistory.removeWhere((m) => m['id'] == msgId);
+      await box.put(hiveSafeKey, jsonEncode(messageHistory));
+    } catch (e) {
+      debugPrint('Failed to delete message: $e');
+    }
+  }
+
   static Future<List<Map<String, dynamic>>> fetchHistory(
     String peerPublicKey,
   ) async {
@@ -289,6 +306,19 @@ class StorageService {
       await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));
     } catch (e) {
       debugPrint('Failed to write to saved messages: $e');
+    }
+  }
+
+  /// Removes a single message from Saved Messages by ID. This is a purely
+  /// local notebook, so unlike [deleteMessage] there's no peer to notify.
+  static Future<void> deleteSavedMessage(String msgId) async {
+    try {
+      final box = _getSettingsBox();
+      final savedHistory = await _readMessageList(box, _savedMessagesDataKey);
+      savedHistory.removeWhere((m) => m['id'] == msgId);
+      await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));
+    } catch (e) {
+      debugPrint('Failed to delete saved message: $e');
     }
   }
 

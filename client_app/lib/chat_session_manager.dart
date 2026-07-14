@@ -30,6 +30,7 @@ class ChatSessionManager {
   final void Function(String senderKey, String msgId) onReadReceiptReceived;
   final void Function(String senderKey) onFriendRequestAccepted;
   final void Function(Set<String> onlinePeers) onStatusUpdateReceived;
+  final void Function(String senderKey, String msgId) onMessageDeleted;
 
   ChatSessionManager({
     required this.serverIp,
@@ -41,6 +42,7 @@ class ChatSessionManager {
     required this.onReadReceiptReceived,
     required this.onFriendRequestAccepted,
     required this.onStatusUpdateReceived,
+    required this.onMessageDeleted,
   });
 
   // --- connection state -----------------------------------------------
@@ -212,6 +214,29 @@ class ChatSessionManager {
       ));
     } catch (e) {
       debugPrint('Failed to send read receipt: $e');
+    }
+  }
+
+  /// Tells [targetKey] that the message identified by [messageId] should be
+  /// deleted on their end too. Like every other packet, this is signed and
+  /// encrypted - the relay never sees which message is being removed.
+  void sendDeleteNotice(String targetKey, String messageId) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({'isDelete': true, 'msgId': messageId});
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(Packet(
+        type: PacketType.message,
+        fromUser: myRawPublicKey,
+        toUser: targetKey.trim(),
+        payload: envelope,
+      ));
+    } catch (e) {
+      debugPrint('Failed to send delete notice: $e');
     }
   }
 
@@ -397,6 +422,14 @@ class ChatSessionManager {
       payloadMap = decoded;
     } catch (e) {
       debugPrint('Dropping packet with malformed decrypted payload: $e');
+      return;
+    }
+
+    if (payloadMap['isDelete'] == true) {
+      final msgId = payloadMap['msgId'];
+      if (msgId is String) {
+        onMessageDeleted(packet.fromUser, msgId);
+      }
       return;
     }
 

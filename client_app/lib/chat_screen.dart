@@ -215,6 +215,24 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       onMessageReceived: (senderPublicKey, text, payloadMap) {
         _processIncomingMessage(senderPublicKey, text, payloadMap);
       },
+      onMessageDeleted: (senderPublicKey, targetMsgId) {
+        final cleanedSenderKey = senderPublicKey.trim();
+        final peerIndex = _peers.indexWhere(
+          (p) => p.rawPublicKey.trim() == cleanedSenderKey,
+        );
+        if (peerIndex == -1) return;
+
+        final peer = _peers[peerIndex];
+        if (mounted) {
+          setState(() {
+            peer.messages.removeWhere((m) => m.id == targetMsgId);
+          });
+        }
+        StorageService.deleteMessage(
+          peerPublicKey: cleanedSenderKey,
+          msgId: targetMsgId,
+        );
+      },
     );
 
     _sessionManager!.initializeWebSocket();
@@ -445,22 +463,34 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     final text = _msgController.text;
     final newMsg = ChatMessage(text, true);
+    final bool isSavedMessagesChat =
+        _selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     try {
-      await _sessionManager!.sendChatMessage(
-        targetKey: _selectedPeer!.rawPublicKey.trim(),
-        text: text,
-        msgId: newMsg.id,
-        timestamp: newMsg.timestamp,
-      );
+      if (isSavedMessagesChat) {
+        // Saved Messages has no one on the other end to send to - it's a
+        // local notebook, so just persist it. No network call at all.
+        await StorageService.forwardToSavedMessages(
+          msgId: newMsg.id,
+          encryptedPayload: text,
+          timestampIso: newMsg.timestamp.toIso8601String(),
+        );
+      } else {
+        await _sessionManager!.sendChatMessage(
+          targetKey: _selectedPeer!.rawPublicKey.trim(),
+          text: text,
+          msgId: newMsg.id,
+          timestamp: newMsg.timestamp,
+        );
 
-      await StorageService.persistEncryptedMessage(
-        peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
-        msgId: newMsg.id,
-        encryptedPayload: text,
-        isMe: true,
-        timestampIso: newMsg.timestamp.toIso8601String(),
-      );
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
+          msgId: newMsg.id,
+          encryptedPayload: text,
+          isMe: true,
+          timestampIso: newMsg.timestamp.toIso8601String(),
+        );
+      }
 
       if (!mounted) return;
       setState(() {
@@ -610,8 +640,31 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           ),
         );
       } else if (selectedValue == 'delete') {
+        final bool isSavedMessagesChat =
+            _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+
+        setState(() {
+          _selectedPeer?.messages.removeWhere((m) => m.id == message.id);
+        });
+
+        if (isSavedMessagesChat) {
+          // Local notebook - nobody else to tell.
+          await StorageService.deleteSavedMessage(message.id);
+        } else if (_selectedPeer != null) {
+          final targetKey = _selectedPeer!.rawPublicKey.trim();
+          await StorageService.deleteMessage(
+            peerPublicKey: targetKey,
+            msgId: message.id,
+          );
+          _sessionManager?.sendDeleteNotice(targetKey, message.id);
+        }
+
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Delete clicked (Placeholder active)')),
+          const SnackBar(
+            content: Text('Message deleted'),
+            duration: Duration(seconds: 1),
+          ),
         );
       } else if (selectedValue == 'save') {
         await StorageService.forwardToSavedMessages(
