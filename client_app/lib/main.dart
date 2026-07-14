@@ -1,20 +1,35 @@
 import 'package:client_app/notification_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'chat_screen.dart';
 import 'storage_service.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // ensure background folder paths are initialized before UI rendering
-  await StorageService.initDatabase();
-  
-  await NotificationService.initialize();
 
-  runApp(const MyApp());
+  // StorageService throws when it can't set up encrypted storage, so we need
+  // somewhere for that to go.
+  String? startupError;
+  try {
+    await StorageService.initDatabase();
+  } catch (e) {
+    debugPrint('Fatal: failed to initialize local storage: $e');
+    startupError = 'Could not initialize secure local storage. Please restart the app.';
+  }
+
+  try {
+    await NotificationService.initialize();
+  } catch (e) {
+    debugPrint('Notification service failed to initialize: $e');
+  }
+
+  runApp(MyApp(startupError: startupError));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  final String? startupError;
+
+  const MyApp({super.key, this.startupError});
 
   @override
   Widget build(BuildContext context) {
@@ -75,7 +90,33 @@ class MyApp extends StatelessWidget {
           surfaceTintColor: Colors.transparent,
         ),
       ),
-      home: const DecentralizedChat(),
+      home: startupError != null
+          ? _StartupErrorScreen(message: startupError!)
+          : const DecentralizedChat(),
+    );
+  }
+}
+
+class _StartupErrorScreen extends StatelessWidget {
+  final String message;
+  const _StartupErrorScreen({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+              const SizedBox(height: 16),
+              Text(message, textAlign: TextAlign.center),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

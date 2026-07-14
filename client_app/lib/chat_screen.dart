@@ -146,6 +146,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _startSession() {
+    // Tear down any previous connection first
+    _sessionManager?.disconnect();
+
     _sessionManager = ChatSessionManager(
       serverIp: _serverIp,
       myRawPublicKey: _myRawPublicKey,

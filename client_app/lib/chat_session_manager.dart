@@ -1,29 +1,35 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:crypton/crypton.dart';
-import 'package:encrypt/encrypt.dart' as enc;
-import 'models.dart';
+
+import 'crypto_service.dart';
+import 'packet.dart';
 import 'storage_service.dart';
 
+/// Owns the WebSocket connection to the relay server and all message
+/// send/receive plumbing.
+///
+/// Responsibilities:
+///  - connection lifecycle (connect / reconnect / disconnect)
+///  - wire-format (de)serialization via [Packet]
+///  - delegating all actual cryptography to [CryptoService]
+///  - routing verified, decrypted payloads to the callbacks the UI layer
+///    supplied
 class ChatSessionManager {
   final String serverIp;
   final String myRawPublicKey;
   final RSAPrivateKey privKey;
-  
-  IOWebSocketChannel? channel;
-  bool isServerConnected = false;
-  bool isConnecting = false;
 
   final VoidCallback onStateChanged;
-  final Function(String senderKey) onFriendRequestReceived;
-  final Function(String senderKey, String text, Map<String, dynamic> payload) onMessageReceived;
-  final Function(String senderKey, String msgId) onReadReceiptReceived;
-  final Function(String senderKey) onFriendRequestAccepted;
-  final Function(Set<String> onlinePeers) onStatusUpdateReceived;
-
-  final Set<String> _onlinePeers = {};
-  Set<String> get onlinePeers => _onlinePeers;
+  final void Function(String senderKey) onFriendRequestReceived;
+  final void Function(String senderKey, String text, Map<String, dynamic> payload) onMessageReceived;
+  final void Function(String senderKey, String msgId) onReadReceiptReceived;
+  final void Function(String senderKey) onFriendRequestAccepted;
+  final void Function(Set<String> onlinePeers) onStatusUpdateReceived;
 
   ChatSessionManager({
     required this.serverIp,
@@ -37,211 +43,215 @@ class ChatSessionManager {
     required this.onStatusUpdateReceived,
   });
 
+  // --- connection state -----------------------------------------------
+  IOWebSocketChannel? _channel;
+  bool isServerConnected = false;
+  bool isConnecting = false;
+
+  /// True once the caller has explicitly asked us to disconnect (app
+  /// backgrounded, user changed server, widget disposed). While true, we
+  /// never attempt to auto-reconnect; only an explicit
+  /// [initializeWebSocket] call resumes activity.
+  bool _manualDisconnect = false;
+
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
+  static const int _maxReconnectDelaySeconds = 30;
+  static const Duration _connectTimeout = Duration(seconds: 10);
+
+  final Set<String> _onlinePeers = {};
+  Set<String> get onlinePeers => _onlinePeers;
+
+  // --- connection lifecycle ---------------------------------------------
+
   void initializeWebSocket() async {
     if (isConnecting) return;
-    
-    // Clean close any trailing pipes explicitly
-    await channel?.sink.close();
-    
+
+    _manualDisconnect = false;
+    _reconnectTimer?.cancel();
+
+    // Close out any previous socket cleanly before opening a new one.
+    await _channel?.sink.close();
+    _channel = null;
+
     isConnecting = true;
     isServerConnected = false;
     onStateChanged();
 
     try {
-      final wsUrl = serverIp.startsWith("ws://") || serverIp.startsWith("wss://")
-          ? serverIp
-          : serverIp.endsWith('/ws')
-              ? "ws://$serverIp"
-              : "ws://$serverIp/ws";
+      final wsUrl = _resolveWebSocketUrl(serverIp);
 
-      // FIXED: Use IOWebSocketChannel.connect to expose the native pingInterval configuration
       final connectedChannel = IOWebSocketChannel.connect(
         Uri.parse(wsUrl),
         pingInterval: const Duration(seconds: 20),
       );
-      
-      channel = connectedChannel;
-      await connectedChannel.ready;
 
+      // Guard against a server address that accepts the TCP connection but
+      // never completes the WebSocket handshake (e.g. wrong port behind a
+      // firewall); without this the app could hang in "connecting" state
+      // forever.
+      await connectedChannel.ready.timeout(_connectTimeout);
+
+      _channel = connectedChannel;
       isServerConnected = true;
       isConnecting = false;
+      _reconnectAttempts = 0;
       onStateChanged();
 
       StorageService.saveServerIp(serverIp);
 
-      channel!.sink.add(
-        jsonEncode({
-          "type": "register",
-          "fromUser": myRawPublicKey,
-          "toUser": "",
-          "payload": "",
-        }),
-      );
+      _send(Packet(
+        type: PacketType.register,
+        fromUser: myRawPublicKey,
+        toUser: '',
+        payload: '',
+      ));
 
-      channel!.stream.listen(
+      connectedChannel.stream.listen(
         (rawData) => _handleIncomingPacket(rawData.toString()),
-        onError: (err) {
-          debugPrint("WebSocket stream encountered an error pipeline condition: $err");
-          _handleDisconnect();
+        onError: (Object err) {
+          debugPrint('WebSocket stream error: $err');
+          _handleDisconnect(scheduleReconnect: true);
         },
         onDone: () {
-          _handleDisconnect();
+          _handleDisconnect(scheduleReconnect: true);
         },
+        cancelOnError: true,
       );
     } catch (e) {
-      debugPrint("WebSocket initialization failed: $e");
-      _handleDisconnect();
+      debugPrint('WebSocket initialization failed: $e');
+      _handleDisconnect(scheduleReconnect: true);
     }
   }
 
-  void _handleDisconnect() {
-    if (!isServerConnected && !isConnecting) return;
-    isServerConnected = false;
-    isConnecting = false;
-    onStateChanged();
+  /// Resolves a user-entered address ("host:port", "ws://host:port", ...)
+  /// into a normalized WebSocket URL
+  static String _resolveWebSocketUrl(String rawAddress) {
+    if (rawAddress.startsWith('ws://') || rawAddress.startsWith('wss://')) {
+      return rawAddress;
+    }
+    return rawAddress.endsWith('/ws') ? 'ws://$rawAddress' : 'ws://$rawAddress/ws';
   }
 
+  void _handleDisconnect({bool scheduleReconnect = false}) {
+    final wasConnected = isServerConnected || isConnecting;
+    isServerConnected = false;
+    isConnecting = false;
+
+    if (wasConnected) {
+      onStateChanged();
+    }
+
+    if (scheduleReconnect && !_manualDisconnect) {
+      _scheduleReconnect();
+    }
+  }
+
+  /// Schedules a reconnect attempt with capped exponential backoff plus
+  /// jitter, so a relay server that's briefly restarting doesn't get
+  /// hammered by every client at the exact same instant.
+  void _scheduleReconnect() {
+    _reconnectTimer?.cancel();
+
+    _reconnectAttempts++;
+    final baseDelaySeconds = min(_maxReconnectDelaySeconds, pow(2, _reconnectAttempts).toInt());
+    final jitterMs = Random().nextInt(1000);
+    final delay = Duration(seconds: baseDelaySeconds, milliseconds: jitterMs);
+
+    debugPrint('Scheduling reconnect attempt #$_reconnectAttempts in ${delay.inSeconds}s');
+
+    _reconnectTimer = Timer(delay, () {
+      if (!_manualDisconnect) {
+        initializeWebSocket();
+      }
+    });
+  }
+
+  /// Ends the session and suppresses auto-reconnect until
+  /// [initializeWebSocket] is explicitly called again.
   void disconnect() {
-    channel?.sink.close();
+    _manualDisconnect = true;
+    _reconnectTimer?.cancel();
+    _channel?.sink.close();
     _handleDisconnect();
   }
 
-  void _handleIncomingPacket(String rawData) {
-    Map<String, dynamic>? parsedPayloadMap;
-    String senderPublicKey = '';
+  /// Releases all resources. Safe to call even if never connected.
+  void dispose() {
+    disconnect();
+  }
 
-    try {
-      final data = jsonDecode(rawData);
-      senderPublicKey = data['fromUser'].toString().trim();
-      final String rawPayload = data['payload'].toString();
-      final String packetType = data['type'] ?? '';
+  // --- outgoing packets ---------------------------------------------------
 
-      if (packetType == 'status_update') {
-        if (senderPublicKey == 'server') {
-          _onlinePeers.clear(); // Flush historical data tracking states
-          final List<dynamic> currentOnlineList = jsonDecode(data['payload']);
-          _onlinePeers.addAll(currentOnlineList.map((e) => e.toString().trim()));
-        } else {
-          final String status = data['payload'];
-          if (status == 'online') {
-            _onlinePeers.add(senderPublicKey);
-          } else {
-            _onlinePeers.remove(senderPublicKey);
-          }
-        }
-        onStatusUpdateReceived(_onlinePeers);
-        return;
-      }
-
-      String decryptedPayloadString;
-      bool isHybridPacket = false;
-
-      try {
-        decryptedPayloadString = privKey.decrypt(rawPayload);
-        parsedPayloadMap = jsonDecode(decryptedPayloadString);
-      } catch (_) {
-        isHybridPacket = true;
-      }
-
-      if (isHybridPacket) {
-        final Map<String, dynamic> hybridBundle = jsonDecode(rawPayload);
-        final String rsaEncryptedKeyBundle = hybridBundle['encryptedAesKey'];
-        final String base64Ciphertext = hybridBundle['ciphertext'];
-
-        final decryptedKeyBundleString = privKey.decrypt(rsaEncryptedKeyBundle);
-        final Map<String, dynamic> keyBundleMap = jsonDecode(decryptedKeyBundleString);
-
-        final aesKey = enc.Key.fromBase64(keyBundleMap['key']);
-        final iv = enc.IV.fromBase64(keyBundleMap['iv']);
-
-        final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.cbc));
-        final decryptedMessageTextPayload = encrypter.decrypt64(base64Ciphertext, iv: iv);
-
-        parsedPayloadMap = jsonDecode(decryptedMessageTextPayload);
-      }
-    } catch (decryptionError) {
-      debugPrint("Actual decryption/parsing failed: $decryptionError");
-      return;
+  /// Sends a raw packet over the socket. Throws if there's no live
+  /// connection, so callers that need "fire and forget" semantics should
+  /// catch and log; callers that need the UI to know about failure (e.g.
+  /// sending a chat message) can let it propagate.
+  void _send(Packet packet) {
+    final channel = _channel;
+    if (channel == null || !isServerConnected) {
+      throw StateError('Cannot send: no active connection to the relay server');
     }
-
-    if (parsedPayloadMap == null) return;
-
-    if (parsedPayloadMap['isReceipt'] == true) {
-      onReadReceiptReceived(senderPublicKey, parsedPayloadMap['msgId']);
-      return;
-    }
-
-    if (parsedPayloadMap['isFriendRequest'] == true) {
-      onFriendRequestReceived(senderPublicKey);
-      return;
-    }
-
-    if (parsedPayloadMap['didAcceptFRequest'] == true) {
-      onFriendRequestAccepted(senderPublicKey);
-      return;
-    }
-
-    onMessageReceived(
-      senderPublicKey,
-      parsedPayloadMap['text'] ?? '',
-      parsedPayloadMap,
-    );
+    channel.sink.add(packet.encode());
   }
 
   void sendReadReceipt(String targetKey, String messageId) {
-    if (channel == null || !isServerConnected) return;
     try {
-      final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-      final receiptPayload = jsonEncode({"isReceipt": true, "msgId": messageId});
-
-      channel!.sink.add(
-        jsonEncode({
-          "type": "message",
-          "fromUser": myRawPublicKey,
-          "toUser": targetKey.trim(),
-          "payload": recipientPublicKeyObj.encrypt(receiptPayload),
-        }),
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({'isReceipt': true, 'msgId': messageId});
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
       );
+      _send(Packet(
+        type: PacketType.message,
+        fromUser: myRawPublicKey,
+        toUser: targetKey.trim(),
+        payload: envelope,
+      ));
     } catch (e) {
-      debugPrint("Failed to serialize read receipt structural packet payload: $e");
+      debugPrint('Failed to send read receipt: $e');
     }
   }
 
   void sendFriendRequest(String targetKey) {
-    if (channel == null || !isServerConnected) return;
     try {
-      final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-      final requestPayload = jsonEncode({"isFriendRequest": true});
-
-      channel!.sink.add(
-        jsonEncode({
-          "type": "message",
-          "fromUser": myRawPublicKey,
-          "toUser": targetKey.trim(),
-          "payload": recipientPublicKeyObj.encrypt(requestPayload),
-        }),
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({'isFriendRequest': true});
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
       );
+      _send(Packet(
+        type: PacketType.message,
+        fromUser: myRawPublicKey,
+        toUser: targetKey.trim(),
+        payload: envelope,
+      ));
     } catch (e) {
-      debugPrint("Failed to encrypt structural friend request packet payload: $e");
+      debugPrint('Failed to send friend request: $e');
     }
   }
 
   void sendFriendRequestReaction(String targetKey, bool didAccept) {
-    if (channel == null || !isServerConnected) return;
     try {
-      final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-      final requestPayload = jsonEncode({"didAcceptFRequest": didAccept});
-
-      channel!.sink.add(
-        jsonEncode({
-          "type": "message",
-          "fromUser": myRawPublicKey,
-          "toUser": targetKey.trim(),
-          "payload": recipientPublicKeyObj.encrypt(requestPayload),
-        }),
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({'didAcceptFRequest': didAccept});
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
       );
+      _send(Packet(
+        type: PacketType.message,
+        fromUser: myRawPublicKey,
+        toUser: targetKey.trim(),
+        payload: envelope,
+      ));
     } catch (e) {
-      debugPrint("Failed to execute friend selection transmission sequence: $e");
+      debugPrint('Failed to send friend-request reaction: $e');
     }
   }
 
@@ -251,42 +261,27 @@ class ChatSessionManager {
     required String msgId,
     required DateTime timestamp,
   }) async {
-    if (channel == null || !isServerConnected) throw Exception("Network channel unavailable");
-
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-
-    final innerMessagePayload = jsonEncode({
-      "isReceipt": false,
-      "isFriendRequest": false,
-      "text": text,
-      "msgId": msgId,
-      "timestamp": timestamp.toIso8601String(),
+    final recipient = RSAPublicKey.fromString(targetKey.trim());
+    final plaintext = jsonEncode({
+      'isReceipt': false,
+      'isFriendRequest': false,
+      'text': text,
+      'msgId': msgId,
+      'timestamp': timestamp.toIso8601String(),
     });
 
-    final ephemeralAesKey = enc.Key.fromSecureRandom(32);
-    final iv = enc.IV.fromSecureRandom(16);
-    final encrypter = enc.Encrypter(enc.AES(ephemeralAesKey, mode: enc.AESMode.cbc));
-    final encryptedCiphertext = encrypter.encrypt(innerMessagePayload, iv: iv);
-
-    final keyBundleToEncrypt = jsonEncode({
-      "key": ephemeralAesKey.base64,
-      "iv": iv.base64,
-    });
-    final rsaEncryptedKeyBundle = recipientPublicKeyObj.encrypt(keyBundleToEncrypt);
-
-    final structuralNetworkPacket = jsonEncode({
-      "encryptedAesKey": rsaEncryptedKeyBundle,
-      "ciphertext": encryptedCiphertext.base64,
-    });
-
-    channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": structuralNetworkPacket,
-      }),
+    final envelope = CryptoService.encryptEnvelope(
+      plaintext: plaintext,
+      recipientPublicKey: recipient,
+      senderPrivateKey: privKey,
     );
+
+    _send(Packet(
+      type: PacketType.message,
+      fromUser: myRawPublicKey,
+      toUser: targetKey.trim(),
+      payload: envelope,
+    ));
   }
 
   Future<void> sendMediaMessage({
@@ -298,40 +293,135 @@ class ChatSessionManager {
     required String fileName,
     required String base64Payload,
   }) async {
-    if (channel == null || !isServerConnected) throw Exception("Network channel unavailable");
-
-    final recipientPublicKeyObj = RSAPublicKey.fromString(targetKey.trim());
-
-    final rawInnerPayloadJson = jsonEncode({
-      "text": text,
-      "msgId": msgId,
-      "timestamp": timestamp.toIso8601String(),
-      "mediaType": mediaType,
-      "mediaFileName": fileName,
-      "base64Data": base64Payload,
+    final recipient = RSAPublicKey.fromString(targetKey.trim());
+    final plaintext = jsonEncode({
+      'text': text,
+      'msgId': msgId,
+      'timestamp': timestamp.toIso8601String(),
+      'mediaType': mediaType,
+      'mediaFileName': fileName,
+      'base64Data': base64Payload,
     });
 
-    final ephemeralAesKey = enc.Key.fromSecureRandom(32);
-    final iv = enc.IV.fromSecureRandom(16);
-    final encrypter = enc.Encrypter(enc.AES(ephemeralAesKey, mode: enc.AESMode.cbc));
-    final encryptedCiphertext = encrypter.encrypt(rawInnerPayloadJson, iv: iv);
+    final envelope = CryptoService.encryptEnvelope(
+      plaintext: plaintext,
+      recipientPublicKey: recipient,
+      senderPrivateKey: privKey,
+    );
 
-    final keyBundleToEncrypt = jsonEncode({
-      "key": ephemeralAesKey.base64,
-      "iv": iv.base64,
-    });
-    final rsaEncryptedKeyBundle = recipientPublicKeyObj.encrypt(keyBundleToEncrypt);
+    _send(Packet(
+      type: PacketType.message,
+      fromUser: myRawPublicKey,
+      toUser: targetKey.trim(),
+      payload: envelope,
+    ));
+  }
 
-    channel!.sink.add(
-      jsonEncode({
-        "type": "message",
-        "fromUser": myRawPublicKey,
-        "toUser": targetKey.trim(),
-        "payload": jsonEncode({
-          "encryptedAesKey": rsaEncryptedKeyBundle,
-          "ciphertext": encryptedCiphertext.base64,
-        }),
-      }),
+  // --- incoming packets ----------------------------------------------------
+
+  void _handleIncomingPacket(String rawData) {
+    final Packet packet;
+    try {
+      packet = Packet.decode(rawData);
+    } on MalformedPacketException catch (e) {
+      // Untrusted input from the network; log and move on.
+      debugPrint('Dropping malformed packet: $e');
+      return;
+    }
+
+    switch (packet.type) {
+      case PacketType.statusUpdate:
+        _handleStatusUpdate(packet);
+        return;
+      case PacketType.message:
+        _handleMessagePacket(packet);
+        return;
+      case PacketType.register:
+        // The server never sends "register" packets back to clients; if
+        // one arrives, it's either a protocol violation or a future
+        // server feature we don't understand yet. Ignoring.
+        return;
+    }
+  }
+
+  void _handleStatusUpdate(Packet packet) {
+    try {
+      if (packet.fromUser == 'server') {
+        final decoded = jsonDecode(packet.payload);
+        if (decoded is! List) {
+          debugPrint('Ignoring status_update: roster payload is not a list');
+          return;
+        }
+        _onlinePeers
+          ..clear()
+          ..addAll(decoded.whereType<Object>().map((e) => e.toString().trim()));
+      } else {
+        final status = packet.payload;
+        if (status == 'online') {
+          _onlinePeers.add(packet.fromUser);
+        } else {
+          _onlinePeers.remove(packet.fromUser);
+        }
+      }
+      onStatusUpdateReceived(_onlinePeers);
+    } catch (e) {
+      debugPrint('Failed to process status_update: $e');
+    }
+  }
+
+  void _handleMessagePacket(Packet packet) {
+    final String plaintext;
+    try {
+      final claimedSender = RSAPublicKey.fromString(packet.fromUser);
+      plaintext = CryptoService.decryptEnvelope(
+        rawEnvelope: packet.payload,
+        myPrivateKey: privKey,
+        expectedSenderPublicKey: claimedSender,
+      );
+    } on EnvelopeAuthException catch (e) {
+      // Either it's not addressed to us, it's corrupted/tampered, or the
+      // signature doesn't match the claimed sender. drop silently in either case.
+      debugPrint('Dropping unverifiable packet: $e');
+      return;
+    } catch (e) {
+      debugPrint('Dropping packet with unparseable sender identity: $e');
+      return;
+    }
+
+    final Map<String, dynamic> payloadMap;
+    try {
+      final decoded = jsonDecode(plaintext);
+      if (decoded is! Map<String, dynamic>) {
+        throw const FormatException('decrypted payload is not a JSON object');
+      }
+      payloadMap = decoded;
+    } catch (e) {
+      debugPrint('Dropping packet with malformed decrypted payload: $e');
+      return;
+    }
+
+    if (payloadMap['isReceipt'] == true) {
+      final msgId = payloadMap['msgId'];
+      if (msgId is String) {
+        onReadReceiptReceived(packet.fromUser, msgId);
+      }
+      return;
+    }
+
+    if (payloadMap['isFriendRequest'] == true) {
+      onFriendRequestReceived(packet.fromUser);
+      return;
+    }
+
+    if (payloadMap['didAcceptFRequest'] == true) {
+      onFriendRequestAccepted(packet.fromUser);
+      return;
+    }
+
+    onMessageReceived(
+      packet.fromUser,
+      (payloadMap['text'] as String?) ?? '',
+      payloadMap,
     );
   }
 }
