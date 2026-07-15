@@ -40,7 +40,7 @@ Future<void> main() async {
 class MyApp extends StatelessWidget {
   final String? startupError;
 
-  MyApp({super.key, this.startupError});
+  const MyApp({super.key, this.startupError});
 
   @override
   Widget build(BuildContext context) {

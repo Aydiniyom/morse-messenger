@@ -400,10 +400,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   void _checkAndSendPendingReceipts() {
     // Ensure we have a valid session and an active, non-system peer selected
     if (_selectedPeer == null || _sessionManager == null) return;
-    if (!_sessionManager!.isServerConnected)
+    if (!_sessionManager!.isServerConnected) {
       return; // Can't send if the socket is down!
-    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey)
+    }
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) {
       return;
+    }
 
     bool stateChanged = false;
 
@@ -458,8 +460,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   void _sendMessage() async {
     if (_msgController.text.isEmpty ||
         _selectedPeer == null ||
-        _sessionManager == null)
+        _sessionManager == null) {
       return;
+    }
 
     final text = _msgController.text;
     final newMsg = ChatMessage(text, true);
@@ -832,8 +835,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 _showDynamicContextMenu(context, tapDetails!, m);
               },
               onLongPress: () {
-                if (tapDetails != null)
+                if (tapDetails != null) {
                   _showDynamicContextMenu(context, tapDetails!, m);
+                }
               },
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4),
