@@ -9,6 +9,8 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'audio_player_widget.dart';
+import 'image_preview_widget.dart';
 import 'models.dart';
 import 'dialogs.dart';
 import 'storage_service.dart';
@@ -16,6 +18,7 @@ import 'connection_setup_screen.dart';
 import 'expanded_sidebar.dart';
 import 'compact_sidebar.dart';
 import 'chat_session_manager.dart';
+import 'video_player_widget.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -241,9 +244,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   Future<void> _pickAndSendMedia() async {
     if (_selectedPeer == null || _sessionManager == null) return;
 
-    // Pick file
     FilePickerResult? result = await FilePicker.platform.pickFiles(
-      withData: false, // Don't cache in memory if we can read from path (better performance)
+      withData: false, 
     );
     if (result == null || result.files.isEmpty) return;
 
@@ -269,7 +271,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
     final DateTime now = DateTime.now();
 
-    // Create our local placeholder with progress tracking initiated
+    // MATCHED PROPERTY NAMES HERE (isTransferring & uploadProgress)
     final tempMessage = ChatMessage(
       "[Sent an Attachment: $fileName]",
       true,
@@ -278,7 +280,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       mediaType: mediaType,
       mediaFileName: fileName,
       localPath: filePath,
-      isUploading: true,
+      isTransferring: true,
       uploadProgress: 0.05,
     );
 
@@ -288,17 +290,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     _scrollToBottom();
 
     try {
-      // 1. Read file bytes asynchronously
       final Uint8List fileBytes = await File(filePath).readAsBytes();
       
-      if (tempMessage.isCancelled) return; // Halt if cancelled during disk I/O
+      if (tempMessage.isCancelled) return; 
 
-      // 2. Encode to base64
       final String base64Payload = base64Encode(fileBytes);
       
-      if (tempMessage.isCancelled) return; // Halt if cancelled during conversion
+      if (tempMessage.isCancelled) return; 
 
-      // 3. Encrypt & Send using our Isolate-backed pipeline
       await _sessionManager!.sendMediaMessage(
         targetKey: cleanedTargetKey,
         msgId: msgId,
@@ -317,7 +316,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         },
       );
 
-      // Save complete entry to DB history
       await StorageService.persistEncryptedMessage(
         peerPublicKey: cleanedTargetKey,
         msgId: msgId,
@@ -326,20 +324,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         timestampIso: now.toIso8601String(),
       );
 
-      // 4. Mark upload as complete
       setState(() {
-        tempMessage.isUploading = false;
+        tempMessage.isTransferring = false;
         tempMessage.uploadProgress = 1.0;
-        // Keep a copy of base64Data locally so the preview loads instantly
         tempMessage.localPath = filePath; 
       });
 
     } catch (e) {
       debugPrint("Failed to process media output pipeline: $e");
       setState(() {
-        tempMessage.isUploading = false;
+        tempMessage.isTransferring = false;
         tempMessage.uploadProgress = 0.0;
-        // If cancelled, remove or mark as error
         if (tempMessage.isCancelled) {
           targetPeer.messages.remove(tempMessage);
         }
@@ -888,9 +883,6 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4),
                 padding: const EdgeInsets.all(12),
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.75,
-                ),
                 decoration: BoxDecoration(
                   color: m.isMe
                       ? const Color(0xFF0B0B0B)
@@ -904,12 +896,10 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // --- Render Media/Attachments if present ---
-                    if (m.isMedia && m.base64Data != null) ...[
-                      _buildMediaContent(m),
+                    if (m.isMedia) ...[
+                      _buildInteractiveMediaContent(m),
                       const SizedBox(height: 8),
                     ],
-                    // --- Text / Message Body ---
                     MarkdownBody(
                       data: m.text,
                       selectable: false,
@@ -935,8 +925,8 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                               fontSize: 12,
                               color: theme.colorScheme.primary,
                             ),
-                            blockquoteDecoration: const BoxDecoration(
-                              color: Color.fromARGB(66, 90, 90, 90),
+                            blockquoteDecoration: BoxDecoration(
+                              color: const Color.fromARGB(66, 90, 90, 90),
                               borderRadius: BorderRadius.all(Radius.circular(10)),
                             ),
                             a: TextStyle(color: theme.colorScheme.primary),
@@ -975,122 +965,134 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     );
   }
 
-  Widget _buildMediaContent(ChatMessage m) {
-    if (m.base64Data == null) return const SizedBox.shrink();
-
-    try {
-      final Uint8List bytes = base64Decode(m.base64Data!);
-
-      if (m.mediaType == 'image') {
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.memory(
-            bytes,
-            fit: BoxFit.cover,
-            errorBuilder: (context, error, stackTrace) {
-              return const Text(
-                'Failed to render image',
-                style: TextStyle(color: Colors.redAccent, fontSize: 12),
-              );
-            },
-          ),
-        );
-      } else {
-        // Fallback layout block for audio, documents, and other file types
-        final IconData icon = m.mediaType == 'audio'
-            ? Icons.audiotrack_rounded
-            : Icons.insert_drive_file_rounded;
-
-        return Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Colors.black26,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, color: Theme.of(context).colorScheme.primary),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  m.mediaFileName ?? 'Attachment',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    overflow: TextOverflow.ellipsis,
+  Widget _buildInteractiveMediaContent(ChatMessage m) {
+    if (m.isTransferring) {
+      return Container(
+        width: 140,
+        height: 100,
+        decoration: BoxDecoration(
+          color: Colors.black26,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.cloud_upload_rounded, color: Colors.white54, size: 28),
+                const SizedBox(height: 6),
+                Text(
+                  m.mediaFileName ?? 'Uploading...',
+                  style: const TextStyle(color: Colors.white30, fontSize: 10),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+            Positioned(
+              right: 8,
+              top: 8,
+              child: GestureDetector(
+                onTap: () {
+                  setState(() {
+                    m.isCancelled = true;
+                    m.isTransferring = false;
+                  });
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: Colors.black54,
+                    shape: BoxShape.circle,
                   ),
+                  child: const Icon(Icons.close_rounded, size: 16, color: Colors.white),
                 ),
               ),
-            ],
+            ),
+            Positioned(
+              bottom: 12,
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  value: m.uploadProgress, // FIXED: Changed progress to uploadProgress
+                  strokeWidth: 2.5,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final File? localFile = m.localPath != null ? File(m.localPath!) : null;
+    final Uint8List? bytes = m.base64Data != null ? base64Decode(m.base64Data!) : null;
+
+    if (m.mediaType == 'image') {
+      if (bytes != null) {
+        return GestureDetector(
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ImagePreviewWidget(
+                  fileName: m.mediaFileName ?? 'image.png',
+                  bytes: bytes,
+                ),
+              ),
+            );
+          },
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.memory(bytes, fit: BoxFit.cover),
+            ),
           ),
         );
       }
-    } catch (e) {
-      return const Text(
-        '[Corrupted Media Attachment]',
-        style: TextStyle(color: Colors.redAccent, fontSize: 12),
-      );
+    } else if (m.mediaType == 'video' && localFile != null && localFile.existsSync()) {
+      return VideoPlayerWidget(file: localFile);
+    } else if (m.mediaType == 'audio' && localFile != null && localFile.existsSync()) {
+      return AudioPlayerWidget(file: localFile);
     }
-  }
 
-  Widget _buildMediaPreview(ChatMessage m, BuildContext context) {
-    final ThemeData theme = Theme.of(context);
-
-    return Stack(
-    alignment: Alignment.center,
-    children: [
-      // The Preview (Image/Video/Audio)
-      if (m.mediaType == 'image' && m.localPath != null)
-        ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.file(File(m.localPath!), width: 200, fit: BoxFit.cover),
-        )
-      else if (m.mediaType == 'video')
-        Container(
-          width: 200, height: 150, color: Colors.black54,
-          child: const Icon(Icons.play_circle_fill, size: 50, color: Colors.white), 
-        )
-      else
-        Container(
-          width: 200, padding: const EdgeInsets.all(16),
-          color: Colors.black26,
-          child: Row(
-            children: [
-              const Icon(Icons.insert_drive_file, color: Colors.white70),
-              const SizedBox(width: 8),
-              Expanded(child: Text(m.mediaFileName ?? 'File', overflow: TextOverflow.ellipsis)),
-            ],
+    return Container(
+      width: 240,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black26,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            m.mediaType == 'audio' ? Icons.audiotrack_rounded : Icons.insert_drive_file_rounded,
+            color: Theme.of(context).colorScheme.primary,
           ),
-        ),
-
-      // The Progress Ring & Cancel Button
-      if (m.isUploading || m.isDownloading)
-        Container(
-          width: 50, height: 50,
-          decoration: const BoxDecoration(
-            color: Colors.black54,
-            shape: BoxShape.circle,
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              m.mediaFileName ?? 'Document',
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              CircularProgressIndicator(
-                value: m.uploadProgress,
-                strokeWidth: 3,
-                color: theme.colorScheme.primary,
-              ),
-              IconButton(
-                icon: const Icon(Icons.close, size: 18, color: Colors.white),
-                onPressed: () {
-                  // Trigger cancellation logic here
-                },
-              ),
-            ],
-          ),
-        ),
-    ],
-  );
+          if (bytes != null)
+            IconButton(
+              icon: const Icon(Icons.download_rounded, size: 18, color: Colors.white60),
+              onPressed: () {
+                // FIXED: Now calls the public saveToDevice method on ImagePreviewWidget
+                ImagePreviewWidget(
+                  fileName: m.mediaFileName ?? 'attachment.dat',
+                  bytes: bytes,
+                ).saveToDevice(context);
+              },
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildMessageInputField(BuildContext context) {
@@ -1099,25 +1101,25 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
       padding: const EdgeInsets.all(24.0),
       child: Row(
         children: [
-          IconButton(
-            onPressed: _pickAndSendMedia,
-            icon: Icon(
-              Icons.attach_file_rounded,
-              color: theme.colorScheme.primary,
-            ),
-          ),
           Expanded(
             child: TextField(
               controller: _msgController,
               focusNode: _msgFocusNode,
               textInputAction: TextInputAction.send,
               onSubmitted: (_) => _sendMessage(),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: 'Message...',
                 filled: true,
-                fillColor: Color(0xFF1E1E1E),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(12)),
+                fillColor: const Color(0xFF1E1E1E),
+                prefixIcon: IconButton(
+                  onPressed: _pickAndSendMedia,
+                  icon: Icon(
+                    Icons.add_circle_outline_rounded,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+                border: const OutlineInputBorder(
+                  borderRadius: BorderRadius.all(Radius.circular(16)),
                   borderSide: BorderSide.none,
                 ),
               ),

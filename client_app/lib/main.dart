@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import 'chat_screen.dart';
 import 'storage_service.dart';
 import 'package:dynamic_color/dynamic_color.dart';
+import 'package:media_kit/media_kit.dart';
 
 final ValueNotifier<bool> useSystemColorNotifier = ValueNotifier<bool>(false);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
 
   // StorageService throws when it can't set up encrypted storage, so we need
   // somewhere for that to go.

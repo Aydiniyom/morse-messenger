@@ -12,8 +12,7 @@ class ChatMessage {
   final String? base64Data;
   String? localPath;
   double uploadProgress; // 0.0 to 1.0
-  bool isUploading;
-  bool isDownloading;
+  bool isTransferring;
   bool isCancelled;
 
   ChatMessage(
@@ -26,8 +25,7 @@ class ChatMessage {
     this.base64Data,
     this.localPath,
     this.uploadProgress = 0.0,
-    this.isUploading = false,
-    this.isDownloading = false,
+    this.isTransferring = false,
     this.isCancelled = false,
   }) : timestamp = customTime ?? DateTime.now(),
        isRead = false,
