@@ -564,8 +564,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-    _jumpToBottom();
-  });
+      _jumpToBottom();
+    });
 
     if (p.rawPublicKey == StorageService.savedMessagesPeerKey) return;
 
@@ -914,6 +914,65 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         ),
       ),
     );
+  }
+
+  Widget _buildMediaPreview(ChatMessage m, BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+
+    return Stack(
+    alignment: Alignment.center,
+    children: [
+      // The Preview (Image/Video/Audio)
+      if (m.mediaType == 'image' && m.localPath != null)
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.file(File(m.localPath!), width: 200, fit: BoxFit.cover),
+        )
+      else if (m.mediaType == 'video')
+        Container(
+          width: 200, height: 150, color: Colors.black54,
+          child: const Icon(Icons.play_circle_fill, size: 50, color: Colors.white), 
+        )
+      else
+        Container(
+          width: 200, padding: const EdgeInsets.all(16),
+          color: Colors.black26,
+          child: Row(
+            children: [
+              const Icon(Icons.insert_drive_file, color: Colors.white70),
+              const SizedBox(width: 8),
+              Expanded(child: Text(m.mediaFileName ?? 'File', overflow: TextOverflow.ellipsis)),
+            ],
+          ),
+        ),
+
+      // The Progress Ring & Cancel Button
+      if (m.isUploading || m.isDownloading)
+        Container(
+          width: 50, height: 50,
+          decoration: const BoxDecoration(
+            color: Colors.black54,
+            shape: BoxShape.circle,
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              CircularProgressIndicator(
+                value: m.uploadProgress,
+                strokeWidth: 3,
+                color: theme.colorScheme.primary,
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, size: 18, color: Colors.white),
+                onPressed: () {
+                  // Trigger cancellation logic here
+                },
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
   }
 
   Widget _buildMessageInputField(BuildContext context) {

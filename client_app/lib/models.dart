@@ -11,6 +11,10 @@ class ChatMessage {
   final String? mediaFileName;
   final String? base64Data;
   String? localPath;
+  double uploadProgress; // 0.0 to 1.0
+  bool isUploading;
+  bool isDownloading;
+  bool isCancelled;
 
   ChatMessage(
     this.text,
@@ -21,6 +25,10 @@ class ChatMessage {
     this.mediaFileName,
     this.base64Data,
     this.localPath,
+    this.uploadProgress = 0.0,
+    this.isUploading = false,
+    this.isDownloading = false,
+    this.isCancelled = false,
   }) : timestamp = customTime ?? DateTime.now(),
        isRead = false,
        id =
