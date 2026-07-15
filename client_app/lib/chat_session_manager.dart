@@ -26,7 +26,12 @@ class ChatSessionManager {
 
   final VoidCallback onStateChanged;
   final void Function(String senderKey) onFriendRequestReceived;
-  final void Function(String senderKey, String text, Map<String, dynamic> payload) onMessageReceived;
+  final void Function(
+    String senderKey,
+    String text,
+    Map<String, dynamic> payload,
+  )
+  onMessageReceived;
   final void Function(String senderKey, String msgId) onReadReceiptReceived;
   final void Function(String senderKey) onFriendRequestAccepted;
   final void Function(Set<String> onlinePeers) onStatusUpdateReceived;
@@ -102,12 +107,14 @@ class ChatSessionManager {
 
       StorageService.saveServerIp(serverIp);
 
-      _send(Packet(
-        type: PacketType.register,
-        fromUser: myRawPublicKey,
-        toUser: '',
-        payload: '',
-      ));
+      _send(
+        Packet(
+          type: PacketType.register,
+          fromUser: myRawPublicKey,
+          toUser: '',
+          payload: '',
+        ),
+      );
 
       connectedChannel.stream.listen(
         (rawData) => _handleIncomingPacket(rawData.toString()),
@@ -132,7 +139,9 @@ class ChatSessionManager {
     if (rawAddress.startsWith('ws://') || rawAddress.startsWith('wss://')) {
       return rawAddress;
     }
-    return rawAddress.endsWith('/ws') ? 'ws://$rawAddress' : 'ws://$rawAddress/ws';
+    return rawAddress.endsWith('/ws')
+        ? 'ws://$rawAddress'
+        : 'ws://$rawAddress/ws';
   }
 
   void _handleDisconnect({bool scheduleReconnect = false}) {
@@ -156,11 +165,16 @@ class ChatSessionManager {
     _reconnectTimer?.cancel();
 
     _reconnectAttempts++;
-    final baseDelaySeconds = min(_maxReconnectDelaySeconds, pow(2, _reconnectAttempts).toInt());
+    final baseDelaySeconds = min(
+      _maxReconnectDelaySeconds,
+      pow(2, _reconnectAttempts).toInt(),
+    );
     final jitterMs = Random().nextInt(1000);
     final delay = Duration(seconds: baseDelaySeconds, milliseconds: jitterMs);
 
-    debugPrint('Scheduling reconnect attempt #$_reconnectAttempts in ${delay.inSeconds}s');
+    debugPrint(
+      'Scheduling reconnect attempt #$_reconnectAttempts in ${delay.inSeconds}s',
+    );
 
     _reconnectTimer = Timer(delay, () {
       if (!_manualDisconnect) {
@@ -206,12 +220,14 @@ class ChatSessionManager {
         recipientPublicKey: recipient,
         senderPrivateKey: privKey,
       );
-      _send(Packet(
-        type: PacketType.message,
-        fromUser: myRawPublicKey,
-        toUser: targetKey.trim(),
-        payload: envelope,
-      ));
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
     } catch (e) {
       debugPrint('Failed to send read receipt: $e');
     }
@@ -229,12 +245,14 @@ class ChatSessionManager {
         recipientPublicKey: recipient,
         senderPrivateKey: privKey,
       );
-      _send(Packet(
-        type: PacketType.message,
-        fromUser: myRawPublicKey,
-        toUser: targetKey.trim(),
-        payload: envelope,
-      ));
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
     } catch (e) {
       debugPrint('Failed to send delete notice: $e');
     }
@@ -249,12 +267,14 @@ class ChatSessionManager {
         recipientPublicKey: recipient,
         senderPrivateKey: privKey,
       );
-      _send(Packet(
-        type: PacketType.message,
-        fromUser: myRawPublicKey,
-        toUser: targetKey.trim(),
-        payload: envelope,
-      ));
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
     } catch (e) {
       debugPrint('Failed to send friend request: $e');
     }
@@ -269,12 +289,14 @@ class ChatSessionManager {
         recipientPublicKey: recipient,
         senderPrivateKey: privKey,
       );
-      _send(Packet(
-        type: PacketType.message,
-        fromUser: myRawPublicKey,
-        toUser: targetKey.trim(),
-        payload: envelope,
-      ));
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
     } catch (e) {
       debugPrint('Failed to send friend-request reaction: $e');
     }
@@ -301,14 +323,17 @@ class ChatSessionManager {
       senderPrivateKey: privKey,
     );
 
-    _send(Packet(
-      type: PacketType.message,
-      fromUser: myRawPublicKey,
-      toUser: targetKey.trim(),
-      payload: envelope,
-    ));
+    _send(
+      Packet(
+        type: PacketType.message,
+        fromUser: myRawPublicKey,
+        toUser: targetKey.trim(),
+        payload: envelope,
+      ),
+    );
   }
 
+  /// Encrypts and sends a media attachment payload using a background isolate.
   Future<void> sendMediaMessage({
     required String targetKey,
     required String msgId,
@@ -317,8 +342,12 @@ class ChatSessionManager {
     required String mediaType,
     required String fileName,
     required String base64Payload,
+    void Function(double progress)? onProgress, // Callback to track steps
   }) async {
-    final recipient = RSAPublicKey.fromString(targetKey.trim());
+    // 1. Report initial progress (e.g., encryption started)
+    onProgress?.call(0.1);
+
+    // 2. Prepare plaintext structure
     final plaintext = jsonEncode({
       'text': text,
       'msgId': msgId,
@@ -328,18 +357,28 @@ class ChatSessionManager {
       'base64Data': base64Payload,
     });
 
-    final envelope = CryptoService.encryptEnvelope(
+    onProgress?.call(0.3);
+
+    // 3. Delegate encryption entirely to the background isolate
+    final envelope = await CryptoService.encryptEnvelopeInBackground(
       plaintext: plaintext,
-      recipientPublicKey: recipient,
-      senderPrivateKey: privKey,
+      recipientPublicKeyPem: targetKey.trim(),
+      senderPrivateKeyPem: privKey.toString(),
     );
 
-    _send(Packet(
-      type: PacketType.message,
-      fromUser: myRawPublicKey,
-      toUser: targetKey.trim(),
-      payload: envelope,
-    ));
+    onProgress?.call(0.8);
+
+    // 4. Send over the WebSocket wire
+    _send(
+      Packet(
+        type: PacketType.message,
+        fromUser: myRawPublicKey,
+        toUser: targetKey.trim(),
+        payload: envelope,
+      ),
+    );
+
+    onProgress?.call(1.0);
   }
 
   // --- incoming packets ----------------------------------------------------

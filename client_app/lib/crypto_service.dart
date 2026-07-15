@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:crypton/crypton.dart';
 import 'package:encrypt/encrypt.dart' as enc;
+import 'package:flutter/foundation.dart';
 
 /// Thrown whenever an envelope fails to decrypt OR fails signature
 /// verification. No need for distinction between the exceptions,
@@ -16,7 +17,7 @@ class EnvelopeAuthException implements Exception {
 }
 
 /// All message-content cryptography for Morse Messenger lives here.
-/// 
+///
 /// Every packet, friend requests, read receipts, chat messages, and media,
 /// goes through the exact same "sign, then hybrid-encrypt" path:
 ///
@@ -141,5 +142,37 @@ class CryptoService {
       // are expected to handle.
       throw EnvelopeAuthException('envelope processing failed: $e');
     }
+  }
+
+  /// Runs heavy media encryption in a background Isolate using compute.
+  /// This keeps the main UI thread running at a smooth framerate.
+  static Future<String> encryptEnvelopeInBackground({
+    required String plaintext,
+    required String recipientPublicKeyPem,
+    required String senderPrivateKeyPem,
+  }) async {
+    // Flutter's compute helper to spawn an Isolate automatically
+    return await compute(_backgroundEncryptTask, {
+      'plaintext': plaintext,
+      'recipientPublicKeyPem': recipientPublicKeyPem,
+      'senderPrivateKeyPem': senderPrivateKeyPem,
+    });
+  }
+
+  /// Entry point running entirely inside the background Isolate.
+  static String _backgroundEncryptTask(Map<String, String> args) {
+    final String plaintext = args['plaintext']!;
+    final String recipientPem = args['recipientPublicKeyPem']!;
+    final String senderPem = args['senderPrivateKeyPem']!;
+
+    final recipientPublicKey = RSAPublicKey.fromString(recipientPem);
+    final senderPrivateKey = RSAPrivateKey.fromString(senderPem);
+
+    // Call the original, synchronous encryptEnvelope on the background thread
+    return encryptEnvelope(
+      plaintext: plaintext,
+      recipientPublicKey: recipientPublicKey,
+      senderPrivateKey: senderPrivateKey,
+    );
   }
 }

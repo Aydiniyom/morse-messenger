@@ -241,13 +241,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   Future<void> _pickAndSendMedia() async {
     if (_selectedPeer == null || _sessionManager == null) return;
 
+    // Pick file
     FilePickerResult? result = await FilePicker.platform.pickFiles(
-      withData: true,
+      withData: false, // Don't cache in memory if we can read from path (better performance)
     );
     if (result == null || result.files.isEmpty) return;
 
     final file = result.files.first;
     final String fileName = file.name;
+    final String? filePath = file.path;
+
+    if (filePath == null) return;
 
     String mediaType = 'document';
     final extension = file.extension?.toLowerCase();
@@ -255,11 +259,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       mediaType = 'image';
     } else if (['mp3', 'wav', 'm4a', 'ogg'].contains(extension)) {
       mediaType = 'audio';
+    } else if (['mp4', 'mov', 'avi', 'mkv'].contains(extension)) {
+      mediaType = 'video';
     }
-
-    final Uint8List fileBytes =
-        file.bytes ?? await File(file.path!).readAsBytes();
-    final String base64Payload = base64Encode(fileBytes);
 
     final targetPeer = _selectedPeer!;
     final cleanedTargetKey = targetPeer.rawPublicKey.trim();
@@ -267,7 +269,36 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
     final DateTime now = DateTime.now();
 
+    // Create our local placeholder with progress tracking initiated
+    final tempMessage = ChatMessage(
+      "[Sent an Attachment: $fileName]",
+      true,
+      customTime: now,
+      customId: msgId,
+      mediaType: mediaType,
+      mediaFileName: fileName,
+      localPath: filePath,
+      isUploading: true,
+      uploadProgress: 0.05,
+    );
+
+    setState(() {
+      targetPeer.messages.add(tempMessage);
+    });
+    _scrollToBottom();
+
     try {
+      // 1. Read file bytes asynchronously
+      final Uint8List fileBytes = await File(filePath).readAsBytes();
+      
+      if (tempMessage.isCancelled) return; // Halt if cancelled during disk I/O
+
+      // 2. Encode to base64
+      final String base64Payload = base64Encode(fileBytes);
+      
+      if (tempMessage.isCancelled) return; // Halt if cancelled during conversion
+
+      // 3. Encrypt & Send using our Isolate-backed pipeline
       await _sessionManager!.sendMediaMessage(
         targetKey: cleanedTargetKey,
         msgId: msgId,
@@ -276,8 +307,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         mediaType: mediaType,
         fileName: fileName,
         base64Payload: base64Payload,
+        onProgress: (progress) {
+          if (tempMessage.isCancelled) {
+            throw Exception('Upload cancelled by user.');
+          }
+          setState(() {
+            tempMessage.uploadProgress = progress;
+          });
+        },
       );
 
+      // Save complete entry to DB history
       await StorageService.persistEncryptedMessage(
         peerPublicKey: cleanedTargetKey,
         msgId: msgId,
@@ -286,24 +326,30 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         timestampIso: now.toIso8601String(),
       );
 
-      if (!mounted) return;
+      // 4. Mark upload as complete
       setState(() {
-        targetPeer.messages.add(
-          ChatMessage(
-            "[Sent an Attachment: $fileName]",
-            true,
-            customTime: now,
-            customId: msgId,
-            mediaType: mediaType,
-            mediaFileName: fileName,
-            base64Data: base64Payload,
-            localPath: file.path,
-          ),
-        );
+        tempMessage.isUploading = false;
+        tempMessage.uploadProgress = 1.0;
+        // Keep a copy of base64Data locally so the preview loads instantly
+        tempMessage.localPath = filePath; 
       });
-      _scrollToBottom();
+
     } catch (e) {
-      debugPrint("Failed to serialise media output pipeline: $e");
+      debugPrint("Failed to process media output pipeline: $e");
+      setState(() {
+        tempMessage.isUploading = false;
+        tempMessage.uploadProgress = 0.0;
+        // If cancelled, remove or mark as error
+        if (tempMessage.isCancelled) {
+          targetPeer.messages.remove(tempMessage);
+        }
+      });
+      
+      if (!tempMessage.isCancelled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to deliver attachment: $e')),
+        );
+      }
     }
   }
 
@@ -799,7 +845,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
-  Widget _buildMessageBubble(ChatMessage m, BuildContext) {
+Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final String timeString =
         "${m.timestamp.hour.toString().padLeft(2, '0')}:${m.timestamp.minute.toString().padLeft(2, '0')}";
@@ -842,6 +888,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4),
                 padding: const EdgeInsets.all(12),
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.75,
+                ),
                 decoration: BoxDecoration(
                   color: m.isMe
                       ? const Color(0xFF0B0B0B)
@@ -851,37 +900,49 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                       ? Border.all(color: Colors.white10, width: 0.5)
                       : null,
                 ),
-                child: MarkdownBody(
-                  data: m.text,
-                  selectable: false,
-                  onTapLink: (text, href, title) async {
-                    if (href != null) {
-                      final Uri url = Uri.parse(href);
-                      if (await canLaunchUrl(url)) {
-                        await launchUrl(
-                          url,
-                          mode: LaunchMode.externalApplication,
-                        );
-                      } else {
-                        debugPrint('Could not launch link: $href');
-                      }
-                    }
-                  },
-                  styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
-                      .copyWith(
-                        p: const TextStyle(color: Colors.white, fontSize: 14),
-                        code: TextStyle(
-                          backgroundColor: Colors.black26,
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          color: theme.colorScheme.primary,
-                        ),
-                        blockquoteDecoration: BoxDecoration(
-                          color: const Color.fromARGB(66, 90, 90, 90),
-                          borderRadius: BorderRadius.all(Radius.circular(10)),
-                        ),
-                        a: TextStyle(color: theme.colorScheme.primary),
-                      ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // --- Render Media/Attachments if present ---
+                    if (m.isMedia && m.base64Data != null) ...[
+                      _buildMediaContent(m),
+                      const SizedBox(height: 8),
+                    ],
+                    // --- Text / Message Body ---
+                    MarkdownBody(
+                      data: m.text,
+                      selectable: false,
+                      onTapLink: (text, href, title) async {
+                        if (href != null) {
+                          final Uri url = Uri.parse(href);
+                          if (await canLaunchUrl(url)) {
+                            await launchUrl(
+                              url,
+                              mode: LaunchMode.externalApplication,
+                            );
+                          } else {
+                            debugPrint('Could not launch link: $href');
+                          }
+                        }
+                      },
+                      styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                          .copyWith(
+                            p: const TextStyle(color: Colors.white, fontSize: 14),
+                            code: TextStyle(
+                              backgroundColor: Colors.black26,
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              color: theme.colorScheme.primary,
+                            ),
+                            blockquoteDecoration: const BoxDecoration(
+                              color: Color.fromARGB(66, 90, 90, 90),
+                              borderRadius: BorderRadius.all(Radius.circular(10)),
+                            ),
+                            a: TextStyle(color: theme.colorScheme.primary),
+                          ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -892,10 +953,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                 children: [
                   Text(
                     timeString,
-                    style: TextStyle(color: Colors.white30, fontSize: 11),
+                    style: const TextStyle(color: Colors.white30, fontSize: 11),
                   ),
-
-                  // Replace the string tick logic with this widget block:
                   if (!isSavedMessagesChat && m.isMe)
                     Padding(
                       padding: const EdgeInsets.only(left: 6.0),
@@ -914,6 +973,65 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         ),
       ),
     );
+  }
+
+  Widget _buildMediaContent(ChatMessage m) {
+    if (m.base64Data == null) return const SizedBox.shrink();
+
+    try {
+      final Uint8List bytes = base64Decode(m.base64Data!);
+
+      if (m.mediaType == 'image') {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.memory(
+            bytes,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) {
+              return const Text(
+                'Failed to render image',
+                style: TextStyle(color: Colors.redAccent, fontSize: 12),
+              );
+            },
+          ),
+        );
+      } else {
+        // Fallback layout block for audio, documents, and other file types
+        final IconData icon = m.mediaType == 'audio'
+            ? Icons.audiotrack_rounded
+            : Icons.insert_drive_file_rounded;
+
+        return Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  m.mediaFileName ?? 'Attachment',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      return const Text(
+        '[Corrupted Media Attachment]',
+        style: TextStyle(color: Colors.redAccent, fontSize: 12),
+      );
+    }
   }
 
   Widget _buildMediaPreview(ChatMessage m, BuildContext context) {
