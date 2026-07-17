@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// Thrown for storage failures that callers may want to distinguish from
 /// "there's simply no data yet" (which is represented by returning
@@ -153,12 +155,23 @@ class StorageService {
   }
 
   // --- SECURE CHAT HISTORY PERSISTENCE LAYER ---
+  //
+  // Media messages carry three extra, optional fields alongside the usual
+  // text payload: [mediaType], [mediaFileName], and [localPath] (the path
+  // to the locally cached copy of the attachment). Every write is merged
+  // with whatever record already exists for that message ID rather than
+  // blindly overwriting it, so a later call that only updates (say) the
+  // read state - and doesn't know or care about media - can't accidentally
+  // wipe out the media metadata that a previous call stored.
   static Future<void> persistEncryptedMessage({
     required String peerPublicKey,
     required String msgId,
     required String encryptedPayload,
     required bool isMe,
     required String timestampIso,
+    String? mediaType,
+    String? mediaFileName,
+    String? localPath,
   }) async {
     try {
       final box = await _getHistoryBox();
@@ -167,12 +180,18 @@ class StorageService {
       final messageHistory = await _readMessageList(box, hiveSafeKey);
 
       final existingIndex = messageHistory.indexWhere((m) => m['id'] == msgId);
+      final Map<String, dynamic> existing =
+          existingIndex != -1 ? messageHistory[existingIndex] : const {};
+
       final record = {
         'id': msgId,
         'isMe': isMe,
         'payload': encryptedPayload,
         'timestamp': timestampIso,
         'isRead': isMe,
+        'mediaType': mediaType ?? existing['mediaType'],
+        'mediaFileName': mediaFileName ?? existing['mediaFileName'],
+        'localPath': localPath ?? existing['localPath'],
       };
 
       if (existingIndex != -1) {
@@ -291,6 +310,9 @@ class StorageService {
     required String msgId,
     required String encryptedPayload,
     required String timestampIso,
+    String? mediaType,
+    String? mediaFileName,
+    String? localPath,
   }) async {
     try {
       final box = _getSettingsBox();
@@ -301,6 +323,9 @@ class StorageService {
         'isMe': true,
         'payload': encryptedPayload,
         'timestamp': timestampIso,
+        'mediaType': mediaType,
+        'mediaFileName': mediaFileName,
+        'localPath': localPath,
       });
 
       await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));
@@ -339,5 +364,70 @@ class StorageService {
       debugPrint('Failed to read saved messages: $e');
       return [];
     }
+  }
+
+  static Future<Directory> getMediaCacheDirectory() async {
+    final baseDir = await getApplicationSupportDirectory();
+    final mediaDir = Directory('${baseDir.path}/media_cache');
+    if (!await mediaDir.exists()) {
+      await mediaDir.create(recursive: true);
+    }
+    return mediaDir;
+  }
+
+  /// Returns a platform-friendly public download directory path.
+  ///
+  /// Never calls `path_provider`'s `getDownloadsDirectory()` on
+  /// Android/Linux - it throws `UnsupportedError` there, and since that was
+  /// previously chained with `??`, the exception was never actually caught
+  /// by the `??` operator and blew straight through this function instead
+  /// of falling back gracefully. On Android specifically, writing directly
+  /// into the public Downloads folder can also fail with a permission
+  /// error on scoped-storage devices (Android 10+), so that path is now
+  /// wrapped so a permission failure falls back to the app's own
+  /// (always-writable, no-permission-needed) external storage directory
+  /// instead of throwing all the way up to the caller.
+  static Future<Directory> getPublicDownloadsDirectory() async {
+    try {
+      if (!kIsWeb && Platform.isAndroid) {
+        final androidDir = Directory('/storage/emulated/0/Download');
+        try {
+          if (!await androidDir.exists()) {
+            await androidDir.create(recursive: true);
+          }
+          // Touch-test the directory is actually writable before handing
+          // it back - `exists()` can return true even when writes are
+          // rejected by scoped storage.
+          final probe = File(
+            '${androidDir.path}/.morse_write_test_${DateTime.now().microsecondsSinceEpoch}',
+          );
+          await probe.writeAsBytes(const [0]);
+          await probe.delete();
+          return androidDir;
+        } catch (e) {
+          debugPrint(
+            'Public Downloads folder not writable ($e) - falling back to '
+            'app-private external storage. Files will still be saved, just '
+            'not directly visible in the system Downloads folder unless '
+            'storage permission is granted to the app.',
+          );
+          final fallback = await getExternalStorageDirectory();
+          if (fallback != null) return fallback;
+        }
+      } else if (!kIsWeb && Platform.isLinux) {
+        final home = Platform.environment['HOME'];
+        if (home != null) {
+          final linuxDownloads = Directory('$home/Downloads');
+          if (await linuxDownloads.exists()) return linuxDownloads;
+        }
+      } else if (!kIsWeb && (Platform.isWindows || Platform.isMacOS)) {
+        final dir = await getDownloadsDirectory();
+        if (dir != null) return dir;
+      }
+    } catch (e) {
+      debugPrint('Failed to resolve public downloads directory: $e');
+    }
+
+    return await getApplicationDocumentsDirectory();
   }
 }

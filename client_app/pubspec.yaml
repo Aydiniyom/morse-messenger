@@ -52,6 +52,7 @@ dependencies:
   media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.7
   audioplayers: ^6.8.1
+  path_provider: ^2.1.6
 dev_dependencies:
   flutter_test:
     sdk: flutter

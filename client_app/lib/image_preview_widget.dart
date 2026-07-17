@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'storage_service.dart';
 
 class ImagePreviewWidget extends StatelessWidget {
   final String fileName;
@@ -13,32 +13,30 @@ class ImagePreviewWidget extends StatelessWidget {
     required this.bytes,
   });
 
-  // CHANGED FROM _saveToDevice to saveToDevice to make it accessible from chat_screen.dart
-  void saveToDevice(BuildContext context) async {
+  Future<void> saveToDevice(BuildContext context) async {
     try {
-      // Direct binary save across Android/iOS/Desktop
-      final directory = Directory('/storage/emulated/0/Download');
-      String basePath = (await directory.exists())
-          ? directory.path
-          : Directory.systemTemp.path;
-
-      final savePath = '$basePath/$fileName';
+      final targetDir = await StorageService.getPublicDownloadsDirectory();
+      final savePath = '${targetDir.path}/$fileName';
       final file = File(savePath);
+      
       await file.writeAsBytes(bytes);
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Saved directly to Downloads: $fileName'),
+            content: Text('Saved to Downloads: $savePath'),
             backgroundColor: Theme.of(context).colorScheme.primary,
           ),
         );
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Could not save media: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not save media: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
       }
     }
   }

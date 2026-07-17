@@ -215,9 +215,37 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           );
         }
       },
-      onMessageReceived: (senderPublicKey, text, payloadMap) {
-        _processIncomingMessage(senderPublicKey, text, payloadMap);
-      },
+      onMessageReceived: (senderKey, text, payload) async {
+          final String? mediaType = payload['mediaType'];
+          final String? mediaFileName = payload['mediaFileName'];
+          final String? base64Data = payload['base64Data'];
+          String? cachedFilePath;
+
+          // Auto-cache incoming media files to the sandbox instantly
+          if (mediaType != null && base64Data != null && mediaFileName != null) {
+            try {
+              final cacheDir = await StorageService.getMediaCacheDirectory();
+              final fileTarget = File('${cacheDir.path}/${payload['msgId']}_$mediaFileName');
+              await fileTarget.writeAsBytes(base64Decode(base64Data));
+              cachedFilePath = fileTarget.path;
+            } catch (e) {
+              debugPrint('Failed to auto-cache incoming media structure: $e');
+            }
+          }
+
+          final incomingMsg = ChatMessage(
+            text,
+            false,
+            customId: payload['msgId'],
+            customTime: DateTime.tryParse(payload['timestamp'] ?? ''),
+            mediaType: mediaType,
+            mediaFileName: mediaFileName,
+            base64Data: base64Data,
+            localPath: cachedFilePath, // Automatically links back to the native audio/video components
+          );
+
+          _handleInboundMessageAppend(senderKey, incomingMsg); 
+        },
       onMessageDeleted: (senderPublicKey, targetMsgId) {
         final cleanedSenderKey = senderPublicKey.trim();
         final peerIndex = _peers.indexWhere(
@@ -226,6 +254,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         if (peerIndex == -1) return;
 
         final peer = _peers[peerIndex];
+        final removedMsgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
+        if (removedMsgIndex != -1) {
+          _deleteCachedMediaFile(peer.messages[removedMsgIndex]);
+        }
         if (mounted) {
           setState(() {
             peer.messages.removeWhere((m) => m.id == targetMsgId);
@@ -239,6 +271,21 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
 
     _sessionManager!.initializeWebSocket();
+  }
+
+  /// Removes the locally cached copy of a media message's attachment, if
+  /// any. Safe to call on text-only messages (no-op) or if the file is
+  /// already gone.
+  Future<void> _deleteCachedMediaFile(ChatMessage m) async {
+    if (m.mediaType == null || m.localPath == null) return;
+    try {
+      final cachedFile = File(m.localPath!);
+      if (await cachedFile.exists()) {
+        await cachedFile.delete();
+      }
+    } catch (e) {
+      debugPrint('Failed to remove cached media file: $e');
+    }
   }
 
   Future<void> _pickAndSendMedia() async {
@@ -294,6 +341,24 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       
       if (tempMessage.isCancelled) return; 
 
+      // Copy into our own permanent media cache. file_picker's returned
+      // path can point at an OS-managed temp/cache location that gets
+      // cleared out from under us (e.g. on low storage, or across app
+      // restarts on some platforms), which is why sent attachments could
+      // silently stop previewing after a while. Keeping our own copy
+      // (same as we already do for received media) fixes that.
+      String persistentLocalPath = filePath;
+      try {
+        final cacheDir = await StorageService.getMediaCacheDirectory();
+        final cachedFile = File('${cacheDir.path}/${msgId}_$fileName');
+        await cachedFile.writeAsBytes(fileBytes);
+        persistentLocalPath = cachedFile.path;
+      } catch (e) {
+        debugPrint('Failed to cache outgoing media locally, keeping picker path: $e');
+      }
+
+      if (tempMessage.isCancelled) return;
+
       final String base64Payload = base64Encode(fileBytes);
       
       if (tempMessage.isCancelled) return; 
@@ -322,12 +387,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         isMe: true,
         encryptedPayload: "[Sent an Attachment: $fileName]",
         timestampIso: now.toIso8601String(),
+        mediaType: mediaType,
+        mediaFileName: fileName,
+        localPath: persistentLocalPath,
       );
 
       setState(() {
         tempMessage.isTransferring = false;
         tempMessage.uploadProgress = 1.0;
-        tempMessage.localPath = filePath; 
+        tempMessage.localPath = persistentLocalPath;
       });
 
     } catch (e) {
@@ -375,66 +443,64 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
-  void _processIncomingMessage(
+  /// Appends a freshly-decrypted, already-constructed inbound message
+  /// ([incomingMsg]) to the right peer's chat, persists it (including any
+  /// media metadata), and fires a read receipt or a notification depending
+  /// on whether the chat is currently open and visible.
+  ///
+  /// This is the counterpart to the outbound `_pickAndSendMedia` /
+  /// `_sendMessage` paths - it's what actually makes a message (text or
+  /// media) show up for the recipient. [incomingMsg] already carries
+  /// `mediaType` / `mediaFileName` / `base64Data` / `localPath` (the
+  /// caller auto-caches media to disk before calling this), so unlike the
+  /// old dead code this replaced, media messages are persisted with their
+  /// metadata instead of degrading into a bare text bubble.
+  Future<void> _handleInboundMessageAppend(
     String senderPublicKey,
-    String rawCiphertext,
-    Map<String, dynamic> payloadMap,
+    ChatMessage incomingMsg,
   ) async {
-    bool peerExists = _peers.any(
-      (p) => p.rawPublicKey.trim() == senderPublicKey,
+    final cleanedSenderKey = senderPublicKey.trim();
+    final peerIndex = _peers.indexWhere(
+      (p) => p.rawPublicKey.trim() == cleanedSenderKey,
     );
-    if (!peerExists) return;
+    // Unknown sender (no accepted friend request yet) - drop it, same as
+    // the previous behavior.
+    if (peerIndex == -1) return;
 
-    final String messageText = payloadMap['text'];
-    final String msgId = payloadMap['msgId'];
-    final DateTime sentTime = DateTime.parse(payloadMap['timestamp']);
-
-    final String? mediaType = payloadMap['mediaType'];
-    final String? mediaFileName = payloadMap['mediaFileName'];
-    final String? base64Data = payloadMap['base64Data'];
+    final sender = _peers[peerIndex];
+    if (sender.messages.any((m) => m.id == incomingMsg.id)) return;
 
     await StorageService.persistEncryptedMessage(
-      peerPublicKey: senderPublicKey,
-      msgId: msgId,
-      encryptedPayload: messageText,
+      peerPublicKey: cleanedSenderKey,
+      msgId: incomingMsg.id,
+      encryptedPayload: incomingMsg.text,
       isMe: false,
-      timestampIso: sentTime.toIso8601String(),
+      timestampIso: incomingMsg.timestamp.toIso8601String(),
+      mediaType: incomingMsg.mediaType,
+      mediaFileName: incomingMsg.mediaFileName,
+      localPath: incomingMsg.localPath,
     );
 
     if (!mounted) return;
+
+    final bool isChatOpenAndVisible =
+        _selectedPeer == sender && _isWindowInFocus && _autoScroll;
+
     setState(() {
-      final sender = _peers.firstWhere(
-        (p) => p.rawPublicKey.trim() == senderPublicKey,
-      );
-      if (!sender.messages.any((m) => m.id == msgId)) {
-        final newIncomingMsg = ChatMessage(
-          messageText,
-          false,
-          customTime: sentTime,
-          customId: msgId,
-          mediaType: mediaType,
-          mediaFileName: mediaFileName,
-          base64Data: base64Data,
-        );
-
-        final bool isChatOpenAndVisible =
-            _selectedPeer == sender && _isWindowInFocus && _autoScroll;
-
-        if (isChatOpenAndVisible) {
-          newIncomingMsg.isRead = true;
-          _sessionManager?.sendReadReceipt(senderPublicKey, msgId);
-        } else {
-          newIncomingMsg.isRead = false;
-          NotificationService.showNotification(
-            id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-            title: "New Message from ${sender.nickname}",
-            body: messageText,
-          );
-        }
-
-        sender.messages.add(newIncomingMsg);
-      }
+      incomingMsg.isRead = isChatOpenAndVisible;
+      sender.messages.add(incomingMsg);
     });
+
+    if (isChatOpenAndVisible) {
+      _sessionManager?.sendReadReceipt(cleanedSenderKey, incomingMsg.id);
+    } else {
+      NotificationService.showNotification(
+        id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        title: "New Message from ${sender.nickname}",
+        body: incomingMsg.text,
+      );
+    }
+
     _scrollToBottom();
   }
 
@@ -592,6 +658,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           record['isMe'] == true,
           customTime: DateTime.parse(record['timestamp']),
           customId: record['id'],
+          mediaType: record['mediaType'] as String?,
+          mediaFileName: record['mediaFileName'] as String?,
+          localPath: record['localPath'] as String?,
         )..isRead = record['isRead'] == true,
       );
     }
@@ -687,6 +756,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         final bool isSavedMessagesChat =
             _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
 
+        await _deleteCachedMediaFile(message);
+
         setState(() {
           _selectedPeer?.messages.removeWhere((m) => m.id == message.id);
         });
@@ -715,6 +786,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           msgId: DateTime.now().millisecondsSinceEpoch.toString(),
           encryptedPayload: message.text,
           timestampIso: DateTime.now().toIso8601String(),
+          mediaType: message.mediaType,
+          mediaFileName: message.mediaFileName,
+          localPath: message.localPath,
         );
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1026,35 +1100,61 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
       );
     }
 
-    final File? localFile = m.localPath != null ? File(m.localPath!) : null;
-    final Uint8List? bytes = m.base64Data != null ? base64Decode(m.base64Data!) : null;
+    final File? localFile =
+        (m.localPath != null && m.localPath!.isNotEmpty) ? File(m.localPath!) : null;
+    final bool hasLocalFile = localFile != null && localFile.existsSync();
+    // In-memory base64Data only ever exists on a message that was just
+    // received or just sent *this session* - it is never persisted to
+    // storage (it'd bloat the encrypted history box), so after switching
+    // chats and back, or after an app restart, it's gone and `localFile`
+    // (the cached copy on disk) is the only source left. Sent images in
+    // particular never had base64Data in memory to begin with - only
+    // received ones do - which is why sent images previously never
+    // rendered as images at all.
+    final Uint8List? inMemoryBytes =
+        m.base64Data != null ? base64Decode(m.base64Data!) : null;
 
-    if (m.mediaType == 'image') {
-      if (bytes != null) {
-        return GestureDetector(
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ImagePreviewWidget(
-                  fileName: m.mediaFileName ?? 'image.png',
-                  bytes: bytes,
-                ),
-              ),
-            );
-          },
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.memory(bytes, fit: BoxFit.cover),
-            ),
-          ),
-        );
+    Future<Uint8List?> resolveBytes() async {
+      if (inMemoryBytes != null) return inMemoryBytes;
+      if (hasLocalFile) {
+        try {
+          return await localFile.readAsBytes();
+        } catch (e) {
+          debugPrint('Failed to read cached media file: $e');
+          return null;
+        }
       }
-    } else if (m.mediaType == 'video' && localFile != null && localFile.existsSync()) {
+      return null;
+    }
+
+    if (m.mediaType == 'image' && (hasLocalFile || inMemoryBytes != null)) {
+      final ImageProvider imageProvider =
+          inMemoryBytes != null ? MemoryImage(inMemoryBytes) : FileImage(localFile!);
+      return GestureDetector(
+        onTap: () async {
+          final previewBytes = await resolveBytes();
+          if (previewBytes == null || !mounted) return;
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ImagePreviewWidget(
+                fileName: m.mediaFileName ?? 'image.png',
+                bytes: previewBytes,
+              ),
+            ),
+          );
+        },
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image(image: imageProvider, fit: BoxFit.cover),
+          ),
+        ),
+      );
+    } else if (m.mediaType == 'video' && hasLocalFile) {
       return VideoPlayerWidget(file: localFile);
-    } else if (m.mediaType == 'audio' && localFile != null && localFile.existsSync()) {
+    } else if (m.mediaType == 'audio' && hasLocalFile) {
       return AudioPlayerWidget(file: localFile);
     }
 
@@ -1079,14 +1179,15 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          if (bytes != null)
+          if (hasLocalFile || inMemoryBytes != null)
             IconButton(
               icon: const Icon(Icons.download_rounded, size: 18, color: Colors.white60),
-              onPressed: () {
-                // FIXED: Now calls the public saveToDevice method on ImagePreviewWidget
+              onPressed: () async {
+                final saveBytes = await resolveBytes();
+                if (saveBytes == null || !mounted) return;
                 ImagePreviewWidget(
                   fileName: m.mediaFileName ?? 'attachment.dat',
-                  bytes: bytes,
+                  bytes: saveBytes,
                 ).saveToDevice(context);
               },
             ),
