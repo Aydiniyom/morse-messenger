@@ -171,6 +171,9 @@ class StorageService {
     required String timestampIso,
     String? mediaType,
     String? mediaFileName,
+    String? mediaId,
+    String? mediaKeyBase64,
+    String? mediaIvBase64,
     String? localPath,
   }) async {
     try {
@@ -191,6 +194,9 @@ class StorageService {
         'isRead': isMe,
         'mediaType': mediaType ?? existing['mediaType'],
         'mediaFileName': mediaFileName ?? existing['mediaFileName'],
+        'mediaId': mediaId ?? existing['mediaId'],
+        'mediaKeyBase64': mediaKeyBase64 ?? existing['mediaKeyBase64'],
+        'mediaIvBase64': mediaIvBase64 ?? existing['mediaIvBase64'],
         'localPath': localPath ?? existing['localPath'],
       };
 
@@ -364,6 +370,21 @@ class StorageService {
       debugPrint('Failed to read saved messages: $e');
       return [];
     }
+  }
+
+  /// Writes [bytes] to the platform's public downloads location under
+  /// [fileName] and returns the full path written to. Shared by every
+  /// media preview (image/audio/video/document) so "save to device" only
+  /// has one implementation to get right.
+  static Future<String> saveBytesToDownloads(
+    String fileName,
+    List<int> bytes,
+  ) async {
+    final targetDir = await getPublicDownloadsDirectory();
+    final savePath = '${targetDir.path}/$fileName';
+    final file = File(savePath);
+    await file.writeAsBytes(bytes);
+    return savePath;
   }
 
   static Future<Directory> getMediaCacheDirectory() async {

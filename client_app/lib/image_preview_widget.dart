@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'storage_service.dart';
@@ -15,11 +14,10 @@ class ImagePreviewWidget extends StatelessWidget {
 
   Future<void> saveToDevice(BuildContext context) async {
     try {
-      final targetDir = await StorageService.getPublicDownloadsDirectory();
-      final savePath = '${targetDir.path}/$fileName';
-      final file = File(savePath);
-      
-      await file.writeAsBytes(bytes);
+      final savePath = await StorageService.saveBytesToDownloads(
+        fileName,
+        bytes,
+      );
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

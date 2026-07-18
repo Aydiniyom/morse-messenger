@@ -16,6 +16,24 @@ class EnvelopeAuthException implements Exception {
   String toString() => 'EnvelopeAuthException: $message';
 }
 
+/// Holds the result of [CryptoService.encryptMediaBytes]: the ciphertext to
+/// upload to the relay, plus the AES key/IV that must travel to the
+/// recipient. The key/IV are meant to be embedded as plain base64 strings
+/// inside a normal envelope plaintext (see [CryptoService.encryptEnvelope])
+/// so they inherit that envelope's RSA confidentiality and signature -
+/// there is no need to wrap them a second time.
+class MediaEncryptionResult {
+  final String keyBase64;
+  final String ivBase64;
+  final Uint8List ciphertext;
+
+  const MediaEncryptionResult({
+    required this.keyBase64,
+    required this.ivBase64,
+    required this.ciphertext,
+  });
+}
+
 /// All message-content cryptography for Morse Messenger lives here.
 ///
 /// Every packet, friend requests, read receipts, chat messages, and media,
@@ -142,6 +160,82 @@ class CryptoService {
       // are expected to handle.
       throw EnvelopeAuthException('envelope processing failed: $e');
     }
+  }
+
+  /// Encrypts raw media bytes (an image/audio/video/document's content)
+  /// with a fresh, single-use AES-256-GCM key. Unlike [encryptEnvelope],
+  /// this does NOT RSA-wrap the key itself - the ciphertext is meant to be
+  /// uploaded to the relay over HTTP, while the returned key/IV are meant
+  /// to be embedded inside a normal signed-and-encrypted envelope (so they
+  /// still only ever reach the intended recipient, just via the existing
+  /// message channel instead of a second RSA operation).
+  static MediaEncryptionResult encryptMediaBytes(Uint8List plaintextBytes) {
+    final aesKey = enc.Key.fromSecureRandom(_aesKeyBytes);
+    final iv = enc.IV.fromSecureRandom(_gcmNonceBytes);
+    final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.gcm));
+    final encrypted = encrypter.encryptBytes(plaintextBytes, iv: iv);
+
+    return MediaEncryptionResult(
+      keyBase64: aesKey.base64,
+      ivBase64: iv.base64,
+      ciphertext: encrypted.bytes,
+    );
+  }
+
+  /// Reverses [encryptMediaBytes]. Throws [EnvelopeAuthException] if the
+  /// GCM authentication tag doesn't match (tampered/corrupted ciphertext,
+  /// or a key/IV mismatch) - identical failure semantics to
+  /// [decryptEnvelope] so callers can handle both the same way.
+  static Uint8List decryptMediaBytes({
+    required Uint8List ciphertext,
+    required String keyBase64,
+    required String ivBase64,
+  }) {
+    try {
+      final aesKey = enc.Key.fromBase64(keyBase64);
+      final iv = enc.IV.fromBase64(ivBase64);
+      final encrypter = enc.Encrypter(enc.AES(aesKey, mode: enc.AESMode.gcm));
+      final decrypted = encrypter.decryptBytes(
+        enc.Encrypted(ciphertext),
+        iv: iv,
+      );
+      return Uint8List.fromList(decrypted);
+    } catch (e) {
+      throw EnvelopeAuthException('media decryption failed: $e');
+    }
+  }
+
+  /// Runs heavy media-byte encryption in a background Isolate via compute,
+  /// keeping the UI thread smooth for large attachments.
+  static Future<MediaEncryptionResult> encryptMediaBytesInBackground(
+    Uint8List plaintextBytes,
+  ) {
+    return compute(_backgroundEncryptMediaTask, plaintextBytes);
+  }
+
+  static MediaEncryptionResult _backgroundEncryptMediaTask(Uint8List bytes) {
+    return encryptMediaBytes(bytes);
+  }
+
+  /// Runs heavy media-byte decryption in a background Isolate via compute.
+  static Future<Uint8List> decryptMediaBytesInBackground({
+    required Uint8List ciphertext,
+    required String keyBase64,
+    required String ivBase64,
+  }) {
+    return compute(_backgroundDecryptMediaTask, {
+      'ciphertext': ciphertext,
+      'keyBase64': keyBase64,
+      'ivBase64': ivBase64,
+    });
+  }
+
+  static Uint8List _backgroundDecryptMediaTask(Map<String, Object> args) {
+    return decryptMediaBytes(
+      ciphertext: args['ciphertext'] as Uint8List,
+      keyBase64: args['keyBase64'] as String,
+      ivBase64: args['ivBase64'] as String,
+    );
   }
 
   /// Runs heavy media encryption in a background Isolate using compute.

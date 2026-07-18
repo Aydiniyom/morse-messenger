@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:crypton/crypton.dart';
 
 import 'crypto_service.dart';
+import 'media_service.dart';
 import 'packet.dart';
 import 'storage_service.dart';
 
@@ -333,7 +335,24 @@ class ChatSessionManager {
     );
   }
 
-  /// Encrypts and sends a media attachment payload using a background isolate.
+  /// Encrypts and sends a media attachment.
+  ///
+  /// Unlike a plain chat message, the media bytes themselves are never
+  /// embedded in the WebSocket packet. Instead:
+  ///  1. The raw bytes are encrypted with a fresh, single-use AES-256-GCM
+  ///     key ([CryptoService.encryptMediaBytes]).
+  ///  2. The ciphertext is streamed to the relay over HTTP POST
+  ///     ([MediaService.uploadEncryptedMedia]), which hands back an opaque
+  ///     media ID.
+  ///  3. A small metadata packet - caption text, media ID, and the AES
+  ///     key/IV - is signed and RSA-encrypted exactly like a normal chat
+  ///     message and sent over the WebSocket.
+  ///
+  /// The relay still never sees plaintext, and the AES key is still only
+  /// ever readable by the intended recipient (it's protected by the same
+  /// envelope signature/encryption as any other message), but the bulk
+  /// bytes no longer have to be base64-inflated and shoved through the
+  /// same socket carrying live presence/read-receipt traffic.
   Future<void> sendMediaMessage({
     required String targetKey,
     required String msgId,
@@ -341,34 +360,43 @@ class ChatSessionManager {
     required String text,
     required String mediaType,
     required String fileName,
-    required String base64Payload,
-    void Function(double progress)? onProgress, // Callback to track steps
+    required Uint8List rawBytes,
+    void Function(double progress)? onProgress,
   }) async {
-    // 1. Report initial progress (e.g., encryption started)
-    onProgress?.call(0.1);
+    onProgress?.call(0.05);
 
-    // 2. Prepare plaintext structure
+    final material = await CryptoService.encryptMediaBytesInBackground(
+      rawBytes,
+    );
+
+    onProgress?.call(0.35);
+
+    final mediaId = await MediaService.uploadEncryptedMedia(
+      serverIp: serverIp,
+      ciphertext: material.ciphertext,
+    );
+
+    onProgress?.call(0.8);
+
     final plaintext = jsonEncode({
       'text': text,
       'msgId': msgId,
       'timestamp': timestamp.toIso8601String(),
       'mediaType': mediaType,
       'mediaFileName': fileName,
-      'base64Data': base64Payload,
+      'mediaId': mediaId,
+      'mediaKey': material.keyBase64,
+      'mediaIv': material.ivBase64,
     });
 
-    onProgress?.call(0.3);
-
-    // 3. Delegate encryption entirely to the background isolate
     final envelope = await CryptoService.encryptEnvelopeInBackground(
       plaintext: plaintext,
       recipientPublicKeyPem: targetKey.trim(),
       senderPrivateKeyPem: privKey.toString(),
     );
 
-    onProgress?.call(0.8);
+    onProgress?.call(0.9);
 
-    // 4. Send over the WebSocket wire
     _send(
       Packet(
         type: PacketType.message,
@@ -379,6 +407,28 @@ class ChatSessionManager {
     );
 
     onProgress?.call(1.0);
+  }
+
+  /// Downloads and decrypts the media referenced by an already-decrypted
+  /// message payload (as delivered via [onMessageReceived]). Callers
+  /// should invoke this once, right after receiving a media message, or
+  /// lazily if the user re-requests a download after the local cache was
+  /// cleared.
+  Future<Uint8List> fetchAndDecryptMedia({
+    required String mediaId,
+    required String mediaKeyBase64,
+    required String mediaIvBase64,
+  }) async {
+    final ciphertext = await MediaService.downloadEncryptedMedia(
+      serverIp: serverIp,
+      mediaId: mediaId,
+    );
+
+    return CryptoService.decryptMediaBytesInBackground(
+      ciphertext: ciphertext,
+      keyBase64: mediaKeyBase64,
+      ivBase64: mediaIvBase64,
+    );
   }
 
   // --- incoming packets ----------------------------------------------------

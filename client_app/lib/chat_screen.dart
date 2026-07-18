@@ -1,5 +1,5 @@
-import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:client_app/notification_service.dart';
 import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
@@ -218,20 +218,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       onMessageReceived: (senderKey, text, payload) async {
           final String? mediaType = payload['mediaType'];
           final String? mediaFileName = payload['mediaFileName'];
-          final String? base64Data = payload['base64Data'];
-          String? cachedFilePath;
+          final String? mediaId = payload['mediaId'];
+          final String? mediaKeyBase64 = payload['mediaKey'];
+          final String? mediaIvBase64 = payload['mediaIv'];
 
-          // Auto-cache incoming media files to the sandbox instantly
-          if (mediaType != null && base64Data != null && mediaFileName != null) {
-            try {
-              final cacheDir = await StorageService.getMediaCacheDirectory();
-              final fileTarget = File('${cacheDir.path}/${payload['msgId']}_$mediaFileName');
-              await fileTarget.writeAsBytes(base64Decode(base64Data));
-              cachedFilePath = fileTarget.path;
-            } catch (e) {
-              debugPrint('Failed to auto-cache incoming media structure: $e');
-            }
-          }
+          final bool hasMedia = mediaType != null &&
+              mediaId != null &&
+              mediaKeyBase64 != null &&
+              mediaIvBase64 != null;
 
           final incomingMsg = ChatMessage(
             text,
@@ -240,11 +234,21 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             customTime: DateTime.tryParse(payload['timestamp'] ?? ''),
             mediaType: mediaType,
             mediaFileName: mediaFileName,
-            base64Data: base64Data,
-            localPath: cachedFilePath, // Automatically links back to the native audio/video components
+            mediaId: mediaId,
+            mediaKeyBase64: mediaKeyBase64,
+            mediaIvBase64: mediaIvBase64,
+            isTransferring: hasMedia,
           );
 
-          _handleInboundMessageAppend(senderKey, incomingMsg); 
+          await _handleInboundMessageAppend(senderKey, incomingMsg);
+
+          // Fetch + decrypt the attachment over HTTP now that the message
+          // itself is visible, instead of the old approach where the
+          // whole file had to already be sitting in the WebSocket packet
+          // before the message could even show up.
+          if (hasMedia) {
+            _downloadAndCacheIncomingMedia(senderKey, incomingMsg);
+          }
         },
       onMessageDeleted: (senderPublicKey, targetMsgId) {
         final cleanedSenderKey = senderPublicKey.trim();
@@ -318,9 +322,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         "${DateTime.now().millisecondsSinceEpoch}-${targetPeer.rawPublicKey.substring(0, 5)}";
     final DateTime now = DateTime.now();
 
-    // MATCHED PROPERTY NAMES HERE (isTransferring & uploadProgress)
+    // Send whatever caption the user already typed (if anything) alongside
+    // the attachment, instead of a hardcoded placeholder string.
+    final String caption = _msgController.text.trim();
+
     final tempMessage = ChatMessage(
-      "[Sent an Attachment: $fileName]",
+      caption,
       true,
       customTime: now,
       customId: msgId,
@@ -334,6 +341,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     setState(() {
       targetPeer.messages.add(tempMessage);
     });
+    _msgController.clear();
     _scrollToBottom();
 
     try {
@@ -359,18 +367,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
       if (tempMessage.isCancelled) return;
 
-      final String base64Payload = base64Encode(fileBytes);
-      
-      if (tempMessage.isCancelled) return; 
-
       await _sessionManager!.sendMediaMessage(
         targetKey: cleanedTargetKey,
         msgId: msgId,
         timestamp: now,
-        text: "[Sent an Attachment: $fileName]",
+        text: caption,
         mediaType: mediaType,
         fileName: fileName,
-        base64Payload: base64Payload,
+        rawBytes: fileBytes,
         onProgress: (progress) {
           if (tempMessage.isCancelled) {
             throw Exception('Upload cancelled by user.');
@@ -385,7 +389,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         peerPublicKey: cleanedTargetKey,
         msgId: msgId,
         isMe: true,
-        encryptedPayload: "[Sent an Attachment: $fileName]",
+        encryptedPayload: caption,
         timestampIso: now.toIso8601String(),
         mediaType: mediaType,
         mediaFileName: fileName,
@@ -451,10 +455,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   /// This is the counterpart to the outbound `_pickAndSendMedia` /
   /// `_sendMessage` paths - it's what actually makes a message (text or
   /// media) show up for the recipient. [incomingMsg] already carries
-  /// `mediaType` / `mediaFileName` / `base64Data` / `localPath` (the
-  /// caller auto-caches media to disk before calling this), so unlike the
-  /// old dead code this replaced, media messages are persisted with their
-  /// metadata instead of degrading into a bare text bubble.
+  /// `mediaType` / `mediaFileName` / `mediaId` / `mediaKeyBase64` /
+  /// `mediaIvBase64` (the attachment bytes themselves are fetched
+  /// separately, right after this call, by
+  /// `_downloadAndCacheIncomingMedia`), so unlike the old dead code this
+  /// replaced, media messages are persisted with their metadata instead of
+  /// degrading into a bare text bubble.
   Future<void> _handleInboundMessageAppend(
     String senderPublicKey,
     ChatMessage incomingMsg,
@@ -478,6 +484,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       timestampIso: incomingMsg.timestamp.toIso8601String(),
       mediaType: incomingMsg.mediaType,
       mediaFileName: incomingMsg.mediaFileName,
+      mediaId: incomingMsg.mediaId,
+      mediaKeyBase64: incomingMsg.mediaKeyBase64,
+      mediaIvBase64: incomingMsg.mediaIvBase64,
       localPath: incomingMsg.localPath,
     );
 
@@ -502,6 +511,152 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
 
     _scrollToBottom();
+  }
+
+  /// Downloads and decrypts [msg]'s attachment over HTTP, caches it to the
+  /// local media sandbox, and updates both UI state and persisted history
+  /// once done. Failures leave [ChatMessage.downloadFailed] set so the UI
+  /// can offer a retry instead of the attachment silently never appearing.
+  Future<void> _downloadAndCacheIncomingMedia(
+    String peerPublicKey,
+    ChatMessage msg,
+  ) async {
+    if (_sessionManager == null ||
+        msg.mediaId == null ||
+        msg.mediaKeyBase64 == null ||
+        msg.mediaIvBase64 == null) {
+      return;
+    }
+
+    final cleanedPeerKey = peerPublicKey.trim();
+
+    try {
+      final bytes = await _sessionManager!.fetchAndDecryptMedia(
+        mediaId: msg.mediaId!,
+        mediaKeyBase64: msg.mediaKeyBase64!,
+        mediaIvBase64: msg.mediaIvBase64!,
+      );
+
+      final cacheDir = await StorageService.getMediaCacheDirectory();
+      final fileTarget = File(
+        '${cacheDir.path}/${msg.id}_${msg.mediaFileName ?? 'attachment'}',
+      );
+      await fileTarget.writeAsBytes(bytes);
+
+      if (mounted) {
+        setState(() {
+          msg.localPath = fileTarget.path;
+          msg.isTransferring = false;
+          msg.downloadFailed = false;
+        });
+      }
+
+      await StorageService.persistEncryptedMessage(
+        peerPublicKey: cleanedPeerKey,
+        msgId: msg.id,
+        isMe: false,
+        encryptedPayload: msg.text,
+        timestampIso: msg.timestamp.toIso8601String(),
+        mediaType: msg.mediaType,
+        mediaFileName: msg.mediaFileName,
+        mediaId: msg.mediaId,
+        mediaKeyBase64: msg.mediaKeyBase64,
+        mediaIvBase64: msg.mediaIvBase64,
+        localPath: fileTarget.path,
+      );
+    } catch (e) {
+      debugPrint('Failed to download/decrypt incoming media: $e');
+      if (mounted) {
+        setState(() {
+          msg.isTransferring = false;
+          msg.downloadFailed = true;
+        });
+      }
+    }
+  }
+
+  /// User-triggered retry after [_downloadAndCacheIncomingMedia] failed.
+  void _retryDownload(ChatMessage m) {
+    if (_selectedPeer == null) return;
+    setState(() {
+      m.downloadFailed = false;
+      m.isTransferring = true;
+    });
+    _downloadAndCacheIncomingMedia(_selectedPeer!.rawPublicKey, m);
+  }
+
+  /// Returns the plaintext bytes for [m]'s attachment, preferring the
+  /// local cache and falling back to an on-demand HTTP fetch + decrypt
+  /// (e.g. the local cache was cleared, or this device never auto-fetched
+  /// it in the first place).
+  Future<Uint8List?> _resolveOrFetchMediaBytes(ChatMessage m) async {
+    if (m.localPath != null && m.localPath!.isNotEmpty) {
+      final cached = File(m.localPath!);
+      if (await cached.exists()) {
+        try {
+          return await cached.readAsBytes();
+        } catch (e) {
+          debugPrint('Failed to read cached media file: $e');
+        }
+      }
+    }
+
+    if (_sessionManager != null &&
+        m.mediaId != null &&
+        m.mediaKeyBase64 != null &&
+        m.mediaIvBase64 != null) {
+      try {
+        return await _sessionManager!.fetchAndDecryptMedia(
+          mediaId: m.mediaId!,
+          mediaKeyBase64: m.mediaKeyBase64!,
+          mediaIvBase64: m.mediaIvBase64!,
+        );
+      } catch (e) {
+        debugPrint('On-demand media fetch failed: $e');
+      }
+    }
+
+    return null;
+  }
+
+  /// Saves a message's attachment (image, audio, video, or document) to
+  /// the device's downloads location. Shared by every media type so
+  /// "download" behaves identically everywhere it appears.
+  Future<void> _saveAttachmentToDevice(ChatMessage m) async {
+    final bytes = await _resolveOrFetchMediaBytes(m);
+    if (!mounted) return;
+
+    if (bytes == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not load attachment for download.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    try {
+      final savePath = await StorageService.saveBytesToDownloads(
+        m.mediaFileName ?? 'attachment.dat',
+        bytes,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Saved to Downloads: $savePath'),
+          backgroundColor: Theme.of(context).colorScheme.primary,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Could not save media: $e'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
   }
 
   void _checkAndSendPendingReceipts() {
@@ -660,6 +815,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           customId: record['id'],
           mediaType: record['mediaType'] as String?,
           mediaFileName: record['mediaFileName'] as String?,
+          mediaId: record['mediaId'] as String?,
+          mediaKeyBase64: record['mediaKeyBase64'] as String?,
+          mediaIvBase64: record['mediaIvBase64'] as String?,
           localPath: record['localPath'] as String?,
         )..isRead = record['isRead'] == true,
       );
@@ -972,8 +1130,9 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   children: [
                     if (m.isMedia) ...[
                       _buildInteractiveMediaContent(m),
-                      const SizedBox(height: 8),
+                      if (m.text.trim().isNotEmpty) const SizedBox(height: 8),
                     ],
+                    if (m.text.trim().isNotEmpty)
                     MarkdownBody(
                       data: m.text,
                       selectable: false,
@@ -1054,15 +1213,24 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
             Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.cloud_upload_rounded, color: Colors.white54, size: 28),
+                Icon(
+                  m.isMe ? Icons.cloud_upload_rounded : Icons.cloud_download_rounded,
+                  color: Colors.white54,
+                  size: 28,
+                ),
                 const SizedBox(height: 6),
                 Text(
-                  m.mediaFileName ?? 'Uploading...',
+                  m.mediaFileName ?? (m.isMe ? 'Uploading...' : 'Downloading...'),
                   style: const TextStyle(color: Colors.white30, fontSize: 10),
                   overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
+            // Only outgoing uploads can be cancelled - an incoming
+            // download's metadata has already been delivered and
+            // persisted, so "cancelling" it would just orphan the
+            // message with no way to fetch its attachment later.
+            if (m.isMe)
             Positioned(
               right: 8,
               top: 8,
@@ -1089,7 +1257,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                 width: 24,
                 height: 24,
                 child: CircularProgressIndicator(
-                  value: m.uploadProgress, // FIXED: Changed progress to uploadProgress
+                  value: m.isMe ? m.uploadProgress : null,
                   strokeWidth: 2.5,
                   color: Theme.of(context).colorScheme.primary,
                 ),
@@ -1100,39 +1268,40 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
       );
     }
 
+    if (m.downloadFailed) {
+      return GestureDetector(
+        onTap: () => _retryDownload(m),
+        child: Container(
+          width: 200,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.error_outline_rounded, color: Colors.redAccent),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Download failed - tap to retry',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final File? localFile =
         (m.localPath != null && m.localPath!.isNotEmpty) ? File(m.localPath!) : null;
     final bool hasLocalFile = localFile != null && localFile.existsSync();
-    // In-memory base64Data only ever exists on a message that was just
-    // received or just sent *this session* - it is never persisted to
-    // storage (it'd bloat the encrypted history box), so after switching
-    // chats and back, or after an app restart, it's gone and `localFile`
-    // (the cached copy on disk) is the only source left. Sent images in
-    // particular never had base64Data in memory to begin with - only
-    // received ones do - which is why sent images previously never
-    // rendered as images at all.
-    final Uint8List? inMemoryBytes =
-        m.base64Data != null ? base64Decode(m.base64Data!) : null;
 
-    Future<Uint8List?> resolveBytes() async {
-      if (inMemoryBytes != null) return inMemoryBytes;
-      if (hasLocalFile) {
-        try {
-          return await localFile.readAsBytes();
-        } catch (e) {
-          debugPrint('Failed to read cached media file: $e');
-          return null;
-        }
-      }
-      return null;
-    }
-
-    if (m.mediaType == 'image' && (hasLocalFile || inMemoryBytes != null)) {
-      final ImageProvider imageProvider =
-          inMemoryBytes != null ? MemoryImage(inMemoryBytes) : FileImage(localFile!);
+    if (m.mediaType == 'image' && hasLocalFile) {
       return GestureDetector(
         onTap: () async {
-          final previewBytes = await resolveBytes();
+          final previewBytes = await _resolveOrFetchMediaBytes(m);
           if (previewBytes == null || !mounted) return;
           Navigator.push(
             context,
@@ -1148,16 +1317,27 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
           constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: Image(image: imageProvider, fit: BoxFit.cover),
+            child: Image.file(localFile, fit: BoxFit.cover),
           ),
         ),
       );
     } else if (m.mediaType == 'video' && hasLocalFile) {
-      return VideoPlayerWidget(file: localFile);
+      return VideoPlayerWidget(
+        file: localFile,
+        onDownload: () => _saveAttachmentToDevice(m),
+      );
     } else if (m.mediaType == 'audio' && hasLocalFile) {
-      return AudioPlayerWidget(file: localFile);
+      return AudioPlayerWidget(
+        file: localFile,
+        onDownload: () => _saveAttachmentToDevice(m),
+      );
     }
 
+    // Fallback for documents, and for image/video/audio messages whose
+    // local cache isn't available (cache cleared, or metadata arrived but
+    // the auto-download hasn't run yet) - the download button here fetches
+    // over HTTP on demand via _resolveOrFetchMediaBytes.
+    final bool canDownload = hasLocalFile || m.mediaId != null;
     return Container(
       width: 240,
       padding: const EdgeInsets.all(12),
@@ -1179,17 +1359,10 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          if (hasLocalFile || inMemoryBytes != null)
+          if (canDownload)
             IconButton(
               icon: const Icon(Icons.download_rounded, size: 18, color: Colors.white60),
-              onPressed: () async {
-                final saveBytes = await resolveBytes();
-                if (saveBytes == null || !mounted) return;
-                ImagePreviewWidget(
-                  fileName: m.mediaFileName ?? 'attachment.dat',
-                  bytes: saveBytes,
-                ).saveToDevice(context);
-              },
+              onPressed: () => _saveAttachmentToDevice(m),
             ),
         ],
       ),

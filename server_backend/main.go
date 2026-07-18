@@ -23,14 +23,18 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,6 +87,26 @@ const (
 	// against connection-flood abuse.
 	registrationsPerIPWindow = time.Minute
 	maxRegistrationsPerIP    = 30
+
+	// maxMediaUploadBytes bounds a single media blob (already end-to-end
+	// encrypted ciphertext, opaque to the relay). Generous enough for a
+	// modest video clip.
+	maxMediaUploadBytes = 200 * 1024 * 1024
+
+	// mediaTTL bounds how long an uploaded media blob is retained if the
+	// recipient never fetches it, mirroring offlineMessageTTL.
+	mediaTTL = 72 * time.Hour
+
+	// uploadsPerIPWindow / maxUploadsPerIP throttle how fast a single
+	// remote address can push new media blobs, as a cheap defense against
+	// using the relay as free anonymous file storage.
+	uploadsPerIPWindow = time.Minute
+	maxUploadsPerIP    = 20
+
+	// mediaIDBytes is the size of the random identifier assigned to each
+	// uploaded blob. 16 bytes (128 bits) is unguessable enough that
+	// knowing the ID is the only way to fetch a blob.
+	mediaIDBytes = 16
 )
 
 const (
@@ -255,6 +279,247 @@ func (h *hub) pruneExpiredQueues(ctx context.Context) {
 			h.mu.Unlock()
 		}
 	}
+}
+
+// --- media store -----------------------------------------------------------
+
+// mediaStore holds already end-to-end-encrypted media blobs on disk,
+// content-blind exactly like the rest of the relay: it only ever sees
+// opaque ciphertext, addressed by an opaque random ID. Sending media via
+// HTTP POST/GET instead of stuffing base64 into a WebSocket JSON packet
+// avoids the ~33% base64 blow-up and lets both ends stream the raw bytes
+// instead of buffering an entire base64 string in memory.
+type mediaStore struct {
+	dir string
+
+	mu      sync.Mutex
+	expires map[string]time.Time // media id -> expiry
+
+	rateMu         sync.Mutex
+	uploadAttempts map[string][]time.Time // remote IP -> recent upload timestamps
+}
+
+func newMediaStore(dir string) (*mediaStore, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return &mediaStore{
+		dir:            dir,
+		expires:        make(map[string]time.Time),
+		uploadAttempts: make(map[string][]time.Time),
+	}, nil
+}
+
+func (s *mediaStore) allowUpload(remoteIP string) bool {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-uploadsPerIPWindow)
+
+	attempts := s.uploadAttempts[remoteIP]
+	kept := attempts[:0]
+	for _, t := range attempts {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+
+	if len(kept) >= maxUploadsPerIP {
+		s.uploadAttempts[remoteIP] = kept
+		return false
+	}
+
+	kept = append(kept, now)
+	s.uploadAttempts[remoteIP] = kept
+	return true
+}
+
+func newMediaID() (string, error) {
+	buf := make([]byte, mediaIDBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// validMediaID rejects anything that isn't exactly the hex encoding of
+// mediaIDBytes random bytes, so a request path can never be used to escape
+// the storage directory or reference an unexpected file.
+func validMediaID(id string) bool {
+	if len(id) != mediaIDBytes*2 {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
+}
+
+func (s *mediaStore) path(id string) string {
+	return filepath.Join(s.dir, id+".bin")
+}
+
+// save streams r to disk under a fresh random ID, enforcing
+// maxMediaUploadBytes, and returns that ID.
+func (s *mediaStore) save(r io.Reader) (string, error) {
+	id, err := newMediaID()
+	if err != nil {
+		return "", err
+	}
+
+	dest := s.path(id)
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+
+	limited := io.LimitReader(r, maxMediaUploadBytes+1)
+	written, copyErr := io.Copy(f, limited)
+	closeErr := f.Close()
+
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(dest)
+		if copyErr != nil {
+			return "", copyErr
+		}
+		return "", closeErr
+	}
+	if written > maxMediaUploadBytes {
+		_ = os.Remove(dest)
+		return "", errors.New("media upload exceeds maximum allowed size")
+	}
+
+	s.mu.Lock()
+	s.expires[id] = time.Now().Add(mediaTTL)
+	s.mu.Unlock()
+
+	return id, nil
+}
+
+// open returns the file for a still-valid media ID, or ok=false if the ID
+// is unknown or has expired.
+func (s *mediaStore) open(id string) (*os.File, bool) {
+	s.mu.Lock()
+	expiry, exists := s.expires[id]
+	s.mu.Unlock()
+
+	if !exists || time.Now().After(expiry) {
+		return nil, false
+	}
+
+	f, err := os.Open(s.path(id))
+	if err != nil {
+		return nil, false
+	}
+	return f, true
+}
+
+// delete removes a media blob, e.g. once it has been successfully
+// delivered to its recipient. Best-effort - relay is store-and-forward for
+// a single recipient, not a durable archive.
+func (s *mediaStore) delete(id string) {
+	s.mu.Lock()
+	delete(s.expires, id)
+	s.mu.Unlock()
+	_ = os.Remove(s.path(id))
+}
+
+// pruneExpired periodically removes blobs whose recipient never fetched
+// them, so abandoned uploads don't accumulate on disk forever. Run as a
+// background goroutine, mirroring hub.pruneExpiredQueues.
+func (s *mediaStore) pruneExpired(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			s.mu.Lock()
+			var stale []string
+			for id, expiry := range s.expires {
+				if now.After(expiry) {
+					stale = append(stale, id)
+				}
+			}
+			for _, id := range stale {
+				delete(s.expires, id)
+			}
+			s.mu.Unlock()
+
+			for _, id := range stale {
+				_ = os.Remove(s.path(id))
+			}
+		}
+	}
+}
+
+// handleUpload accepts a raw, already-encrypted media blob in the request
+// body and stores it under a fresh random ID.
+func (s *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !s.allowUpload(r.RemoteAddr) {
+		http.Error(w, "too many uploads, slow down", http.StatusTooManyRequests)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxMediaUploadBytes+1)
+	defer r.Body.Close()
+
+	id, err := s.save(r.Body)
+	if err != nil {
+		if err.Error() == "http: request body too large" || strings.Contains(err.Error(), "exceeds maximum") {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		log.Printf("media upload failed: %v", err)
+		http.Error(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+
+	resp, err := json.Marshal(map[string]string{"id": id})
+	if err != nil {
+		http.Error(w, "upload failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(resp)
+}
+
+// handleDownload streams a previously uploaded blob back to the caller and
+// then deletes it - the relay is single-recipient store-and-forward, not a
+// durable file host.
+func (s *mediaStore) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/media/download/")
+	if !validMediaID(id) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	f, ok := s.open(id)
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	if _, err := io.Copy(w, f); err != nil {
+		log.Printf("media download for %s... interrupted: %v", safePrefix(id, 8), err)
+		return
+	}
+
+	s.delete(id)
 }
 
 // --- connection handling -------------------------------------------------
@@ -484,16 +749,25 @@ func main() {
 	addr := flag.String("addr", envOr("MORSE_RELAY_ADDR", ":8080"), "listen address")
 	tlsCert := flag.String("tls-cert", os.Getenv("MORSE_RELAY_TLS_CERT"), "path to TLS certificate (optional)")
 	tlsKey := flag.String("tls-key", os.Getenv("MORSE_RELAY_TLS_KEY"), "path to TLS private key (optional)")
+	mediaDir := flag.String("media-dir", envOr("MORSE_RELAY_MEDIA_DIR", filepath.Join(os.TempDir(), "morse-relay-media")), "directory to store in-flight encrypted media blobs")
 	flag.Parse()
 
 	h := newHub()
 
+	mediaStoreInstance, err := newMediaStore(*mediaDir)
+	if err != nil {
+		log.Fatalf("failed to initialize media store at %s: %v", *mediaDir, err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.pruneExpiredQueues(ctx)
+	go mediaStoreInstance.pruneExpired(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", h.handleConnections)
+	mux.HandleFunc("/media/upload", mediaStoreInstance.handleUpload)
+	mux.HandleFunc("/media/download/", mediaStoreInstance.handleDownload)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

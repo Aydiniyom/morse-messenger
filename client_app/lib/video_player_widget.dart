@@ -5,7 +5,12 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 class VideoPlayerWidget extends StatefulWidget {
   final File file;
-  const VideoPlayerWidget({super.key, required this.file});
+
+  /// Called when the user wants to save this attachment to their device.
+  /// Omit to hide the download button.
+  final VoidCallback? onDownload;
+
+  const VideoPlayerWidget({super.key, required this.file, this.onDownload});
 
   @override
   State<VideoPlayerWidget> createState() => _VideoPlayerWidgetState();
@@ -69,6 +74,26 @@ class _VideoPlayerWidgetState extends State<VideoPlayerWidget> {
               Video(controller: _controller),
               _VideoControlsOverlay(player: _player),
               _VideoProgressBar(player: _player),
+              if (widget.onDownload != null)
+                Positioned(
+                  right: 6,
+                  top: 6,
+                  child: GestureDetector(
+                    onTap: widget.onDownload,
+                    child: Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: const BoxDecoration(
+                        color: Colors.black45,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.download_rounded,
+                        size: 16,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
