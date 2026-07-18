@@ -383,7 +383,19 @@ class Dialogs {
     required BuildContext context,
     required Function(String emoji) onSelected,
   }) {
-    const emojis = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🐳'];
+    const emojis = [
+      '👍',
+      '👎',
+      '❤️',
+      '😍',
+      '😭',
+      '😂',
+      '😢',
+      '🙏',
+      '🐳',
+      '🤷',
+      '😁',
+    ];
 
     showDialog(
       context: context,
