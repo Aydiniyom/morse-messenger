@@ -46,6 +46,19 @@ class ChatSessionManager {
   )
   onReactionReceived;
 
+  /// Fires for an inbound group message - [senderKey] is whichever member
+  /// actually sent it (not necessarily anyone in particular), [groupId]
+  /// identifies which group it belongs to, and [payload] is the same
+  /// decrypted JSON map [onMessageReceived] gets, just with `isGroupMessage`
+  /// and `groupId` added to it.
+  final void Function(
+    String senderKey,
+    String groupId,
+    String text,
+    Map<String, dynamic> payload,
+  )
+  onGroupMessageReceived;
+
   ChatSessionManager({
     required this.serverIp,
     required this.myRawPublicKey,
@@ -58,6 +71,7 @@ class ChatSessionManager {
     required this.onStatusUpdateReceived,
     required this.onMessageDeleted,
     required this.onReactionReceived,
+    required this.onGroupMessageReceived,
   });
 
   // --- connection state -----------------------------------------------
@@ -454,6 +468,124 @@ class ChatSessionManager {
     onProgress?.call(1.0);
   }
 
+  /// Sends a text message to every member of a group.
+  ///
+  /// There is no such thing as a "group packet" on the wire - the relay
+  /// has no concept of groups at all. This just calls the exact same
+  /// sign-then-hybrid-encrypt path as a 1:1 message, once per member, each
+  /// addressed individually and each carrying the same [groupId] and
+  /// [msgId] in its plaintext so every recipient can file it under the
+  /// same conversation. One member's copy failing to encrypt/send (e.g. a
+  /// malformed key) doesn't stop delivery to the rest.
+  Future<void> sendGroupMessage({
+    required List<String> memberKeys,
+    required String groupId,
+    required String text,
+    required String msgId,
+    required DateTime timestamp,
+  }) async {
+    final plaintext = jsonEncode({
+      'isReceipt': false,
+      'isFriendRequest': false,
+      'isGroupMessage': true,
+      'groupId': groupId,
+      'text': text,
+      'msgId': msgId,
+      'timestamp': timestamp.toIso8601String(),
+    });
+
+    for (final memberKey in memberKeys) {
+      try {
+        final recipient = RSAPublicKey.fromString(memberKey.trim());
+        final envelope = CryptoService.encryptEnvelope(
+          plaintext: plaintext,
+          recipientPublicKey: recipient,
+          senderPrivateKey: privKey,
+        );
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to deliver group message to a member: $e');
+      }
+    }
+  }
+
+  /// Sends a media attachment to every member of a group.
+  ///
+  /// The bytes are still only ever uploaded once - group members share
+  /// the same ciphertext blob on the relay, exactly like a 1:1 attachment
+  /// does. Only the small metadata packet (caption, media ID, AES key/IV)
+  /// is repeated, once per member, the same way [sendGroupMessage] repeats
+  /// a text message.
+  Future<void> sendGroupMediaMessage({
+    required List<String> memberKeys,
+    required String groupId,
+    required String msgId,
+    required DateTime timestamp,
+    required String text,
+    required String mediaType,
+    required String fileName,
+    required Uint8List rawBytes,
+    void Function(double progress)? onProgress,
+  }) async {
+    onProgress?.call(0.05);
+
+    final material = await CryptoService.encryptMediaBytesInBackground(
+      rawBytes,
+    );
+
+    onProgress?.call(0.35);
+
+    final mediaId = await MediaService.uploadEncryptedMedia(
+      serverIp: serverIp,
+      ciphertext: material.ciphertext,
+    );
+
+    onProgress?.call(0.7);
+
+    for (final memberKey in memberKeys) {
+      try {
+        final plaintext = jsonEncode({
+          'isGroupMessage': true,
+          'groupId': groupId,
+          'text': text,
+          'msgId': msgId,
+          'timestamp': timestamp.toIso8601String(),
+          'mediaType': mediaType,
+          'mediaFileName': fileName,
+          'mediaId': mediaId,
+          'mediaKey': material.keyBase64,
+          'mediaIv': material.ivBase64,
+        });
+
+        final envelope = await CryptoService.encryptEnvelopeInBackground(
+          plaintext: plaintext,
+          recipientPublicKeyPem: memberKey.trim(),
+          senderPrivateKeyPem: privKey.toString(),
+        );
+
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to deliver group attachment to a member: $e');
+      }
+    }
+
+    onProgress?.call(1.0);
+  }
+
   /// Downloads and decrypts the media referenced by an already-decrypted
   /// message payload (as delivered via [onMessageReceived]). Callers
   /// should invoke this once, right after receiving a media message, or
@@ -556,6 +688,19 @@ class ChatSessionManager {
       payloadMap = decoded;
     } catch (e) {
       debugPrint('Dropping packet with malformed decrypted payload: $e');
+      return;
+    }
+
+    if (payloadMap['isGroupMessage'] == true) {
+      final groupId = payloadMap['groupId'];
+      if (groupId is String) {
+        onGroupMessageReceived(
+          packet.fromUser,
+          groupId,
+          (payloadMap['text'] as String?) ?? '',
+          payloadMap,
+        );
+      }
       return;
     }
 

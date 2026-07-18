@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:client_app/notification_service.dart';
 import 'package:client_app/rounded_divider.dart';
@@ -41,7 +43,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   final FocusNode _msgFocusNode = FocusNode();
 
   final List<ChatPeer> _peers = [];
+  // Groups are just [ChatPeer]s with `isGroup: true`: same messages list,
+  // same storage functions, same selection/rendering code. Kept in their
+  // own list only so the sidebar can be handed "peers and groups"
+  // separately from "peers I might friend-request".
+  final List<ChatPeer> _groups = [];
   ChatPeer? _selectedPeer;
+
+  /// What the sidebars actually render: every 1:1 contact plus every
+  /// group, side by side. Both sidebar widgets already work purely in
+  /// terms of [ChatPeer] (nickname, shortId, messages, online status), so
+  /// groups slot in without either sidebar needing to know groups exist.
+  List<ChatPeer> get _sidebarEntries => [..._peers, ..._groups];
   late RSAPrivateKey _privKey;
 
   String _serverIp = "localhost:8080";
@@ -132,6 +145,16 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       );
     }).toList();
 
+    final savedGroups = await StorageService.fetchGroupList();
+    final List<ChatPeer> hydratedGroups = savedGroups.map((data) {
+      return ChatPeer(
+        rawPublicKey: data['id'] as String,
+        nickname: data['name'] as String,
+        isGroup: true,
+        groupMemberKeys: (data['members'] as List).cast<String>(),
+      );
+    }).toList();
+
     final String? savedIp = await StorageService.fetchServerIp();
 
     if (!mounted) return;
@@ -140,6 +163,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _myRawPublicKey = kp.publicKey.toString().trim();
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
       _peers.addAll(hydratedPeers);
+      _groups.addAll(hydratedGroups);
 
       if (savedIp != null && savedIp.isNotEmpty) {
         _serverIp = savedIp;
@@ -283,6 +307,83 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           reactions: message.reactions,
         );
       },
+      onGroupMessageReceived: (senderKey, groupId, text, payload) async {
+        final cleanedSenderKey = senderKey.trim();
+        final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+        if (groupIndex == -1) return; // not (or no longer) in this group
+
+        final group = _groups[groupIndex];
+        // Defense in depth: every envelope is already RSA-signed
+        // end-to-end, so the sender can't be spoofed - but this also
+        // rejects a message from someone who simply isn't a member of
+        // this group (e.g. removed, or a stranger who learned the ID).
+        if (!group.groupMemberKeys.contains(cleanedSenderKey)) return;
+
+        final String? mediaType = payload['mediaType'];
+        final String? mediaFileName = payload['mediaFileName'];
+        final String? mediaId = payload['mediaId'];
+        final String? mediaKeyBase64 = payload['mediaKey'];
+        final String? mediaIvBase64 = payload['mediaIv'];
+        final bool hasMedia = mediaType != null &&
+            mediaId != null &&
+            mediaKeyBase64 != null &&
+            mediaIvBase64 != null;
+
+        final incomingMsg = ChatMessage(
+          text,
+          false,
+          customId: payload['msgId'],
+          customTime: DateTime.tryParse(payload['timestamp'] ?? ''),
+          senderKey: cleanedSenderKey,
+          mediaType: mediaType,
+          mediaFileName: mediaFileName,
+          mediaId: mediaId,
+          mediaKeyBase64: mediaKeyBase64,
+          mediaIvBase64: mediaIvBase64,
+          isTransferring: hasMedia,
+        );
+
+        if (group.messages.any((m) => m.id == incomingMsg.id)) return;
+
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: groupId,
+          msgId: incomingMsg.id,
+          encryptedPayload: text,
+          isMe: false,
+          timestampIso: incomingMsg.timestamp.toIso8601String(),
+          mediaType: mediaType,
+          mediaFileName: mediaFileName,
+          mediaId: mediaId,
+          mediaKeyBase64: mediaKeyBase64,
+          mediaIvBase64: mediaIvBase64,
+        );
+
+        if (!mounted) return;
+
+        final bool isChatOpenAndVisible =
+            _selectedPeer == group && _isWindowInFocus && _autoScroll;
+
+        setState(() {
+          incomingMsg.isRead = isChatOpenAndVisible;
+          group.messages.add(incomingMsg);
+        });
+
+        if (!isChatOpenAndVisible) {
+          NotificationService.showNotification(
+            id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            title: group.nickname,
+            body: text,
+          );
+        }
+
+        _scrollToBottom();
+
+        // Fetch + decrypt the shared attachment over HTTP, same as a 1:1
+        // media message - the ciphertext was only ever uploaded once.
+        if (hasMedia) {
+          _downloadAndCacheIncomingMedia(groupId, incomingMsg);
+        }
+      },
       onMessageDeleted: (senderPublicKey, targetMsgId) {
         final cleanedSenderKey = senderPublicKey.trim();
         final peerIndex = _peers.indexWhere(
@@ -400,23 +501,39 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
       if (tempMessage.isCancelled) return;
 
-      await _sessionManager!.sendMediaMessage(
-        targetKey: cleanedTargetKey,
-        msgId: msgId,
-        timestamp: now,
-        text: caption,
-        mediaType: mediaType,
-        fileName: fileName,
-        rawBytes: fileBytes,
-        onProgress: (progress) {
-          if (tempMessage.isCancelled) {
-            throw Exception('Upload cancelled by user.');
-          }
-          setState(() {
-            tempMessage.uploadProgress = progress;
-          });
-        },
-      );
+      void onUploadProgress(double progress) {
+        if (tempMessage.isCancelled) {
+          throw Exception('Upload cancelled by user.');
+        }
+        setState(() {
+          tempMessage.uploadProgress = progress;
+        });
+      }
+
+      if (targetPeer.isGroup) {
+        await _sessionManager!.sendGroupMediaMessage(
+          memberKeys: targetPeer.groupMemberKeys,
+          groupId: cleanedTargetKey,
+          msgId: msgId,
+          timestamp: now,
+          text: caption,
+          mediaType: mediaType,
+          fileName: fileName,
+          rawBytes: fileBytes,
+          onProgress: onUploadProgress,
+        );
+      } else {
+        await _sessionManager!.sendMediaMessage(
+          targetKey: cleanedTargetKey,
+          msgId: msgId,
+          timestamp: now,
+          text: caption,
+          mediaType: mediaType,
+          fileName: fileName,
+          rawBytes: fileBytes,
+          onProgress: onUploadProgress,
+        );
+      }
 
       await StorageService.persistEncryptedMessage(
         peerPublicKey: cleanedTargetKey,
@@ -701,6 +818,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) {
       return;
     }
+    // Read receipts aren't implemented for groups in this first pass -
+    // fanning "I read this" out to every member (and reconciling N
+    // separate per-member read states per message) is a real feature of
+    // its own, kept out of scope here so what does ship is correct.
+    if (_selectedPeer!.isGroup) return;
 
     bool stateChanged = false;
 
@@ -752,6 +874,111 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     _nameController.clear();
   }
 
+  /// A random, locally-generated 128-bit group ID (as hex). It's never
+  /// sent anywhere on its own - it only ever travels wrapped inside an
+  /// invite code the creator shares out-of-band - so the relay has no way
+  /// to learn a group exists, let alone who's in it.
+  String _generateGroupId() {
+    final rand = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rand.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  void _syncGroupsToStorage() async {
+    final serialized = _groups
+        .map(
+          (g) => {
+            'id': g.rawPublicKey,
+            'name': g.nickname,
+            'members': g.groupMemberKeys,
+          },
+        )
+        .toList();
+    await StorageService.saveGroupList(serialized);
+  }
+
+  /// Creates a new group locally, then shows the invite code that needs
+  /// to be shared with [memberKeys] out-of-band so they can join via
+  /// [_handleJoinGroup]. Nobody is contacted automatically - creating a
+  /// group is a purely local action, same as generating your own
+  /// identity key pair.
+  void _handleCreateGroup(String groupName, List<String> memberKeys) {
+    final groupId = _generateGroupId();
+    final cleanedMembers = memberKeys
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty && k != _myRawPublicKey)
+        .toSet()
+        .toList();
+
+    setState(() {
+      final newGroup = ChatPeer(
+        rawPublicKey: groupId,
+        nickname: groupName,
+        isGroup: true,
+        groupMemberKeys: cleanedMembers,
+      );
+      _groups.add(newGroup);
+      _selectedPeer = newGroup;
+    });
+    _syncGroupsToStorage();
+
+    final inviteCode = base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'id': groupId,
+          'members': [...cleanedMembers, _myRawPublicKey],
+        }),
+      ),
+    );
+
+    Dialogs.showGroupInvite(context: context, inviteCode: inviteCode);
+  }
+
+  /// Joins a group from an invite code produced by [_handleCreateGroup].
+  /// [groupName] is your own local name for it, same idea as nicknaming a
+  /// new contact.
+  void _handleJoinGroup(String groupName, String inviteCode) {
+    try {
+      final decoded = jsonDecode(utf8.decode(base64Decode(inviteCode.trim())));
+      if (decoded is! Map ||
+          decoded['id'] is! String ||
+          decoded['members'] is! List) {
+        throw const FormatException('malformed invite code');
+      }
+
+      final groupId = decoded['id'] as String;
+      if (_groups.any((g) => g.rawPublicKey == groupId)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("You've already joined this group.")),
+        );
+        return;
+      }
+
+      final otherMembers = (decoded['members'] as List)
+          .whereType<String>()
+          .map((k) => k.trim())
+          .where((k) => k != _myRawPublicKey)
+          .toSet()
+          .toList();
+
+      setState(() {
+        final newGroup = ChatPeer(
+          rawPublicKey: groupId,
+          nickname: groupName,
+          isGroup: true,
+          groupMemberKeys: otherMembers,
+        );
+        _groups.add(newGroup);
+        _selectedPeer = newGroup;
+      });
+      _syncGroupsToStorage();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Invalid invite code: $e')),
+      );
+    }
+  }
+
   void _sendMessage() async {
     if (_msgController.text.isEmpty ||
         _selectedPeer == null ||
@@ -771,6 +998,22 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         await StorageService.forwardToSavedMessages(
           msgId: newMsg.id,
           encryptedPayload: text,
+          timestampIso: newMsg.timestamp.toIso8601String(),
+        );
+      } else if (_selectedPeer!.isGroup) {
+        await _sessionManager!.sendGroupMessage(
+          memberKeys: _selectedPeer!.groupMemberKeys,
+          groupId: _selectedPeer!.rawPublicKey,
+          text: text,
+          msgId: newMsg.id,
+          timestamp: newMsg.timestamp,
+        );
+
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: _selectedPeer!.rawPublicKey,
+          msgId: newMsg.id,
+          encryptedPayload: text,
+          isMe: true,
           timestampIso: newMsg.timestamp.toIso8601String(),
         );
       } else {
@@ -870,6 +1113,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     });
 
     if (p.rawPublicKey == StorageService.savedMessagesPeerKey) return;
+    if (p.isGroup) return; // no read receipts for groups yet, see above
 
     for (var m in p.messages) {
       if (!m.isMe && !m.isRead) {
@@ -922,8 +1166,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   Future<void> _toggleReaction(ChatMessage message, String emoji) async {
     if (_selectedPeer == null) return;
     // Saved Messages is a local notebook with nobody else to react - keep
-    // reactions scoped to real peer conversations only.
-    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) {
+    // reactions scoped to real peer conversations only. Groups aren't
+    // wired up for reactions yet either (same reasoning as read receipts
+    // above - fanning a reaction update out to every member is future
+    // work, not included in this first pass).
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey ||
+        _selectedPeer!.isGroup) {
       return;
     }
 
@@ -962,6 +1210,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     final bool isSavedMessagesChat =
         _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+    final bool isGroupChat = _selectedPeer?.isGroup ?? false;
 
     showMenu(
       context: context,
@@ -970,7 +1219,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         Offset.zero & overlay.size,
       ),
       items: [
-        if (!isSavedMessagesChat)
+        if (!isSavedMessagesChat && !isGroupChat)
           const PopupMenuItem(
             value: 'react',
             child: Row(
@@ -1059,7 +1308,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             peerPublicKey: targetKey,
             msgId: message.id,
           );
-          _sessionManager?.sendDeleteNotice(targetKey, message.id);
+          // "Delete for everyone" isn't implemented for groups yet - same
+          // scope decision as reactions/receipts above - so this only
+          // removes it from your own device, like Saved Messages does.
+          if (!_selectedPeer!.isGroup) {
+            _sessionManager?.sendDeleteNotice(targetKey, message.id);
+          }
         }
 
         if (!mounted) return;
@@ -1088,6 +1342,29 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     });
   }
 
+  /// Opens the "+" menu behind both sidebars: Create Group, Join Group,
+  /// or Add Contact (the original single-purpose dialog, unchanged and
+  /// still reachable, just one tap further in now).
+  void _showAddMenu() {
+    Dialogs.showAddOptions(
+      context: context,
+      onCreateGroup: () => Dialogs.showCreateGroup(
+        context: context,
+        onCreate: _handleCreateGroup,
+      ),
+      onJoinGroup: () => Dialogs.showJoinGroup(
+        context: context,
+        onJoin: _handleJoinGroup,
+      ),
+      onAddContact: () => Dialogs.showAddPeer(
+        context: context,
+        nameController: _nameController,
+        keyInputController: _keyInputController,
+        onConnect: _handleConnectNewPeer,
+      ),
+    );
+  }
+
   void _showSettingsDialog() {
     Dialogs.showSettingsDialog(
       context: context,
@@ -1112,6 +1389,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _myRawPublicKey = kp.publicKey.toString().trim();
       _myShortId = _myRawPublicKey.substring(_myRawPublicKey.length - 15);
       _peers.clear();
+      _groups.clear();
       _selectedPeer = null;
       _onlinePeers.clear();
     });
@@ -1153,6 +1431,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
                   subtitle: Text(
                     isSavedMessagesChat
                         ? 'Save messages here via the right-click / hold menu.'
+                        : _selectedPeer!.isGroup
+                        ? '${_selectedPeer!.groupMemberKeys.length + 1} members'
                         : 'Target: ${_selectedPeer!.shortId}',
                     style: const TextStyle(
                       fontSize: 11,
@@ -1202,6 +1482,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
+  /// Resolves a group message sender's raw public key to something
+  /// readable: their nickname if they're already one of your contacts,
+  /// otherwise their short ID (same fallback [ChatPeer.shortId] uses).
+  String _displayNameFor(String rawPublicKey) {
+    final known = _peers.where((p) => p.rawPublicKey.trim() == rawPublicKey);
+    if (known.isNotEmpty) return known.first.nickname;
+    return rawPublicKey.length > 15
+        ? rawPublicKey.substring(rawPublicKey.length - 15)
+        : rawPublicKey;
+  }
+
 Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final String timeString =
@@ -1209,6 +1500,8 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     TapDownDetails? tapDetails;
     final bool isSavedMessagesChat =
         _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+    final bool isGroupChat = _selectedPeer?.isGroup ?? false;
+    final bool reactionsDisabled = isSavedMessagesChat || isGroupChat;
 
     return Align(
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -1231,6 +1524,18 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               ? CrossAxisAlignment.end
               : CrossAxisAlignment.start,
           children: [
+            if (isGroupChat && !m.isMe && m.senderKey != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 6, bottom: 2),
+                child: Text(
+                  _displayNameFor(m.senderKey!),
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+              ),
             GestureDetector(
               onTapDown: (details) => tapDetails = details,
               onSecondaryTapDown: (details) {
@@ -1244,7 +1549,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               },
               // Double-tap/double-click is a shortcut for a 👍 reaction -
               // no-op in Saved Messages, same as every other reaction path.
-              onDoubleTap: isSavedMessagesChat
+              onDoubleTap: reactionsDisabled
                   ? null
                   : () => _toggleReaction(m, '👍'),
               child: Container(
@@ -1314,7 +1619,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                     timeString,
                     style: const TextStyle(color: Colors.white30, fontSize: 11),
                   ),
-                  if (!isSavedMessagesChat && m.isMe)
+                  if (!isSavedMessagesChat && !isGroupChat && m.isMe)
                     Padding(
                       padding: const EdgeInsets.only(left: 6.0),
                       child: Icon(
@@ -1688,7 +1993,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                 color: Color(0xFF1A1A1A),
               ),
               child: ExpandedSidebar(
-                peers: _peers,
+                peers: _sidebarEntries,
                 selectedPeer: _selectedPeer,
                 onlinePeers: _onlinePeers,
                 onSelectPeer: _selectAndLoadPeer,
@@ -1699,12 +2004,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   shortId: _myShortId,
                   rawPublicKey: _myRawPublicKey,
                 ),
-                onAddPeerPressed: () => Dialogs.showAddPeer(
-                  context: context,
-                  nameController: _nameController,
-                  keyInputController: _keyInputController,
-                  onConnect: _handleConnectNewPeer,
-                ),
+                onAddPeerPressed: _showAddMenu,
               ),
             ),
           ),
@@ -1753,7 +2053,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                       ),
                       child: SafeArea(
                         child: ExpandedSidebar(
-                          peers: _peers,
+                          peers: _sidebarEntries,
                           selectedPeer: _selectedPeer,
                           onlinePeers: _onlinePeers,
                           onSelectPeer: _selectAndLoadPeer,
@@ -1765,18 +2065,13 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                             shortId: _myShortId,
                             rawPublicKey: _myRawPublicKey,
                           ),
-                          onAddPeerPressed: () => Dialogs.showAddPeer(
-                            context: context,
-                            nameController: _nameController,
-                            keyInputController: _keyInputController,
-                            onConnect: _handleConnectNewPeer,
-                          ),
+                          onAddPeerPressed: _showAddMenu,
                         ),
                       ),
                     )
                   else
                     CompactSidebar(
-                      peers: _peers,
+                      peers: _sidebarEntries,
                       selectedPeer: _selectedPeer,
                       onlinePeers: _onlinePeers,
                       onSelectPeer: _selectAndLoadPeer,

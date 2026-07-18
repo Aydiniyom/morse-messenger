@@ -517,4 +517,251 @@ class Dialogs {
       ),
     );
   }
+
+  /// Entry point behind the "+" button. Instead of jumping straight into
+  /// "Add Contact", this lets the user choose what kind of new
+  /// conversation they want to start; each option hands off to its own
+  /// dialog below.
+  static void showAddOptions({
+    required BuildContext context,
+    required VoidCallback onCreateGroup,
+    required VoidCallback onJoinGroup,
+    required VoidCallback onAddContact,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Add'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(Icons.group_add_rounded, color: theme.colorScheme.primary),
+              title: const Text('Create Group'),
+              onTap: () {
+                Navigator.pop(ctx);
+                onCreateGroup();
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.login_rounded, color: theme.colorScheme.primary),
+              title: const Text('Join Group'),
+              onTap: () {
+                Navigator.pop(ctx);
+                onJoinGroup();
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.person_add_alt_1_rounded, color: theme.colorScheme.primary),
+              title: const Text('Add Contact'),
+              onTap: () {
+                Navigator.pop(ctx);
+                onAddContact();
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Creates a brand-new group. You name it locally - exactly like naming
+  /// a contact in [showAddPeer] - and list the other members' identity
+  /// keys, one per line. The relay is never told the group exists; after
+  /// creation, [showGroupInvite] shows a code to share with those members
+  /// out-of-band so they can join via [showJoinGroup].
+  static void showCreateGroup({
+    required BuildContext context,
+    required Function(String groupName, List<String> memberKeys) onCreate,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    final nameController = TextEditingController();
+    final membersController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Create Group'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(hintText: "Group name..."),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: membersController,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                hintText: "Members' identity keys, one per line...",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+            ),
+            onPressed: () {
+              final memberKeys = membersController.text
+                  .split('\n')
+                  .map((k) => k.trim())
+                  .where((k) => k.isNotEmpty)
+                  .toList();
+              if (nameController.text.isNotEmpty && memberKeys.isNotEmpty) {
+                // Dismiss this dialog *before* onCreate runs - it opens the
+                // invite-code dialog right away, and popping afterwards
+                // would close that new dialog instead of this one (since
+                // Navigator.pop just closes whatever's on top).
+                Navigator.pop(ctx);
+                onCreate(nameController.text.trim(), memberKeys);
+              }
+            },
+            child: const Text('Create', style: TextStyle(color: Colors.black)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Shown right after a group is created: the invite code to copy and
+  /// send to your members out-of-band (however you'd normally reach
+  /// them) - pasting it into [showJoinGroup] is how they get in.
+  static void showGroupInvite({
+    required BuildContext context,
+    required String inviteCode,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Group Created'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Share this invite code with your members. They\'ll paste it '
+              'into "Join Group".',
+              style: TextStyle(color: Colors.white60, fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.black26,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              constraints: const BoxConstraints(maxHeight: 140),
+              child: SingleChildScrollView(
+                child: Text(
+                  inviteCode,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 10,
+                    color: Colors.white30,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+            ),
+            icon: const Icon(Icons.copy, size: 16, color: Colors.black),
+            label: const Text(
+              'Copy Invite Code',
+              style: TextStyle(color: Colors.black),
+            ),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: inviteCode));
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Invite code copied to clipboard!'),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Joins a group from an invite code produced by [showGroupInvite]. You
+  /// still pick your own local name for the group here, exactly like
+  /// naming a new contact in [showAddPeer].
+  static void showJoinGroup({
+    required BuildContext context,
+    required Function(String groupName, String inviteCode) onJoin,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    final nameController = TextEditingController();
+    final inviteController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Join Group'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(hintText: "Name for this group..."),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: inviteController,
+              maxLines: 4,
+              decoration: const InputDecoration(hintText: "Paste invite code..."),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: theme.colorScheme.primary,
+            ),
+            onPressed: () {
+              if (nameController.text.isNotEmpty &&
+                  inviteController.text.isNotEmpty) {
+                onJoin(nameController.text.trim(), inviteController.text.trim());
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Join', style: TextStyle(color: Colors.black)),
+          ),
+        ],
+      ),
+    );
+  }
 }

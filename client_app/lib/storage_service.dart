@@ -154,6 +154,47 @@ class StorageService {
     }
   }
 
+  // --- GROUP CHAT PROFILE INDEX ---
+  //
+  // Stored in the same encrypted identity box as the peer list, keyed
+  // separately so the two schemas (a peer's shape vs. a group's shape)
+  // never collide. A group's message history is persisted through the
+  // exact same [persistEncryptedMessage]/[fetchHistory]/[deleteMessage]
+  // calls used for peers - callers just pass the group's ID in wherever
+  // those functions expect a peer's public key, since both are really
+  // just "the string this conversation is filed under".
+  static const _groupListKey = 'saved_chat_groups_list';
+
+  static Future<void> saveGroupList(
+    List<Map<String, dynamic>> serializedGroups,
+  ) async {
+    try {
+      final box = await _getIdentityBox();
+      await box.put(_groupListKey, jsonEncode(serializedGroups));
+    } catch (e) {
+      debugPrint('Failed to write group list: $e');
+    }
+  }
+
+  static Future<List<Map<String, dynamic>>> fetchGroupList() async {
+    try {
+      final box = await _getIdentityBox();
+      final String? rawJson = box.get(_groupListKey) as String?;
+      if (rawJson == null) return [];
+
+      final decodedList = jsonDecode(rawJson);
+      if (decodedList is! List) return [];
+
+      return decodedList
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+    } catch (e) {
+      debugPrint('Failed to read group list: $e');
+      return [];
+    }
+  }
+
   // --- SECURE CHAT HISTORY PERSISTENCE LAYER ---
   //
   // Media messages carry three extra, optional fields alongside the usual

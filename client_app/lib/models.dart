@@ -37,6 +37,13 @@ class ChatMessage {
   /// ever "me" and one peer to populate it.
   Map<String, Set<String>> reactions;
 
+  /// Raw public key of whoever actually sent this message, when it's known
+  /// and different from a simple "me vs. the one peer I'm talking to"
+  /// relationship - i.e. for group messages, where a bubble can come from
+  /// any member. Null for every 1:1 message and for anything you sent
+  /// yourself; the UI only shows a sender label when this is set.
+  final String? senderKey;
+
   ChatMessage(
     this.text,
     this.isMe, {
@@ -53,6 +60,7 @@ class ChatMessage {
     this.isCancelled = false,
     this.downloadFailed = false,
     Map<String, Set<String>>? reactions,
+    this.senderKey,
   }) : timestamp = customTime ?? DateTime.now(),
        isRead = false,
        reactions = reactions ?? {},
@@ -70,9 +78,20 @@ class ChatPeer {
   List<ChatMessage> messages = [];
   bool isPending;
 
+  /// True if this entry represents a group chat rather than a 1:1 contact.
+  /// When true, [rawPublicKey] holds the group's locally-generated ID
+  /// (not an RSA public key) and [groupMemberKeys] holds the raw public
+  /// keys of every other member - everything needed to encrypt a message
+  /// once per member, the same way a 1:1 message is encrypted once for its
+  /// one recipient.
+  final bool isGroup;
+  final List<String> groupMemberKeys;
+
   ChatPeer({
     required this.rawPublicKey,
     required this.nickname,
     this.isPending = false,
+    this.isGroup = false,
+    this.groupMemberKeys = const [],
   }) : shortId = rawPublicKey.substring(rawPublicKey.length - 15);
 }
