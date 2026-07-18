@@ -38,6 +38,13 @@ class ChatSessionManager {
   final void Function(String senderKey) onFriendRequestAccepted;
   final void Function(Set<String> onlinePeers) onStatusUpdateReceived;
   final void Function(String senderKey, String msgId) onMessageDeleted;
+  final void Function(
+    String senderKey,
+    String msgId,
+    String emoji,
+    bool isAdd,
+  )
+  onReactionReceived;
 
   ChatSessionManager({
     required this.serverIp,
@@ -50,6 +57,7 @@ class ChatSessionManager {
     required this.onFriendRequestAccepted,
     required this.onStatusUpdateReceived,
     required this.onMessageDeleted,
+    required this.onReactionReceived,
   });
 
   // --- connection state -----------------------------------------------
@@ -304,6 +312,43 @@ class ChatSessionManager {
     }
   }
 
+  /// Tells [targetKey] that we've added or removed an [emoji] reaction on
+  /// the message identified by [messageId]. Like read receipts and delete
+  /// notices, this is signed and encrypted the same as any chat message -
+  /// the relay only ever sees an opaque envelope, never which message or
+  /// emoji is involved.
+  void sendReactionUpdate(
+    String targetKey,
+    String messageId,
+    String emoji,
+    bool isAdd,
+  ) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({
+        'isReaction': true,
+        'msgId': messageId,
+        'emoji': emoji,
+        'isAdd': isAdd,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send reaction update: $e');
+    }
+  }
+
   Future<void> sendChatMessage({
     required String targetKey,
     required String text,
@@ -526,6 +571,16 @@ class ChatSessionManager {
       final msgId = payloadMap['msgId'];
       if (msgId is String) {
         onReadReceiptReceived(packet.fromUser, msgId);
+      }
+      return;
+    }
+
+    if (payloadMap['isReaction'] == true) {
+      final msgId = payloadMap['msgId'];
+      final emoji = payloadMap['emoji'];
+      final isAdd = payloadMap['isAdd'];
+      if (msgId is String && emoji is String && isAdd is bool) {
+        onReactionReceived(packet.fromUser, msgId, emoji, isAdd);
       }
       return;
     }

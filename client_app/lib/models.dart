@@ -28,6 +28,15 @@ class ChatMessage {
   /// the UI can offer a retry instead of silently showing nothing.
   bool downloadFailed;
 
+  /// Emoji reactions on this message, keyed by the emoji itself, with each
+  /// value being the set of raw public keys of everyone who reacted with
+  /// that emoji. A single reactor key can appear under multiple emojis (you
+  /// can stack more than one reaction onto the same message), and each
+  /// emoji can carry multiple reactor keys - so this already generalizes to
+  /// group chats without any format change, even though today there's only
+  /// ever "me" and one peer to populate it.
+  Map<String, Set<String>> reactions;
+
   ChatMessage(
     this.text,
     this.isMe, {
@@ -43,8 +52,10 @@ class ChatMessage {
     this.isTransferring = false,
     this.isCancelled = false,
     this.downloadFailed = false,
+    Map<String, Set<String>>? reactions,
   }) : timestamp = customTime ?? DateTime.now(),
        isRead = false,
+       reactions = reactions ?? {},
        id =
            customId ??
            "${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(10000)}";

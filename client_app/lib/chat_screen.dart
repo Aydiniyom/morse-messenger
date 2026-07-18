@@ -250,6 +250,39 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             _downloadAndCacheIncomingMedia(senderKey, incomingMsg);
           }
         },
+      onReactionReceived: (senderKey, targetMsgId, emoji, isAdd) async {
+        final cleanedSenderKey = senderKey.trim();
+        final peerIndex = _peers.indexWhere(
+          (p) => p.rawPublicKey.trim() == cleanedSenderKey,
+        );
+        if (peerIndex == -1) return;
+
+        final peer = _peers[peerIndex];
+        final msgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
+        if (msgIndex == -1) return;
+
+        final message = peer.messages[msgIndex];
+
+        if (mounted) {
+          setState(() {
+            _applyReactionChange(
+              message: message,
+              emoji: emoji,
+              reactorKey: cleanedSenderKey,
+              isAdd: isAdd,
+            );
+          });
+        }
+
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: cleanedSenderKey,
+          msgId: targetMsgId,
+          encryptedPayload: message.text,
+          isMe: message.isMe,
+          timestampIso: message.timestamp.toIso8601String(),
+          reactions: message.reactions,
+        );
+      },
       onMessageDeleted: (senderPublicKey, targetMsgId) {
         final cleanedSenderKey = senderPublicKey.trim();
         final peerIndex = _peers.indexWhere(
@@ -819,6 +852,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           mediaKeyBase64: record['mediaKeyBase64'] as String?,
           mediaIvBase64: record['mediaIvBase64'] as String?,
           localPath: record['localPath'] as String?,
+          reactions: _parseReactions(record['reactions']),
         )..isRead = record['isRead'] == true,
       );
     }
@@ -845,6 +879,79 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
   }
 
+  /// Mutates [message]'s reaction map in place: adds or removes
+  /// [reactorKey] from the set for [emoji], cleaning up the emoji entry
+  /// entirely once nobody's reacting with it anymore. Shared by both the
+  /// locally-initiated path ([_toggleReaction]) and the incoming-packet
+  /// path, so the two can never drift out of sync with each other.
+  void _applyReactionChange({
+    required ChatMessage message,
+    required String emoji,
+    required String reactorKey,
+    required bool isAdd,
+  }) {
+    if (isAdd) {
+      message.reactions.putIfAbsent(emoji, () => <String>{}).add(reactorKey);
+    } else {
+      final set = message.reactions[emoji];
+      set?.remove(reactorKey);
+      if (set != null && set.isEmpty) {
+        message.reactions.remove(emoji);
+      }
+    }
+  }
+
+  /// Reconstructs a reaction map (emoji -> reactor public keys) from the
+  /// JSON-ish structure that comes back out of Hive storage.
+  Map<String, Set<String>> _parseReactions(dynamic raw) {
+    if (raw is! Map) return {};
+    final result = <String, Set<String>>{};
+    raw.forEach((key, value) {
+      if (key is String && value is List) {
+        final keys = value.whereType<String>().toSet();
+        if (keys.isNotEmpty) result[key] = keys;
+      }
+    });
+    return result;
+  }
+
+  /// Toggles my own reaction with [emoji] on [message]: adds it if I
+  /// haven't reacted with it yet, removes it if I have. Used by the
+  /// double-tap "thumbs up" shortcut, the reaction picker dialog, and
+  /// tapping an existing reaction bubble to un-react.
+  Future<void> _toggleReaction(ChatMessage message, String emoji) async {
+    if (_selectedPeer == null) return;
+    // Saved Messages is a local notebook with nobody else to react - keep
+    // reactions scoped to real peer conversations only.
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) {
+      return;
+    }
+
+    final peer = _selectedPeer!;
+    final targetKey = peer.rawPublicKey.trim();
+    final bool isAdd = !(message.reactions[emoji]?.contains(_myRawPublicKey) ?? false);
+
+    setState(() {
+      _applyReactionChange(
+        message: message,
+        emoji: emoji,
+        reactorKey: _myRawPublicKey,
+        isAdd: isAdd,
+      );
+    });
+
+    await StorageService.persistEncryptedMessage(
+      peerPublicKey: targetKey,
+      msgId: message.id,
+      encryptedPayload: message.text,
+      isMe: message.isMe,
+      timestampIso: message.timestamp.toIso8601String(),
+      reactions: message.reactions,
+    );
+
+    _sessionManager?.sendReactionUpdate(targetKey, message.id, emoji, isAdd);
+  }
+
   void _showDynamicContextMenu(
     BuildContext context,
     TapDownDetails details,
@@ -853,6 +960,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     final RenderBox overlay =
         Overlay.of(context).context.findRenderObject() as RenderBox;
 
+    final bool isSavedMessagesChat =
+        _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
+
     showMenu(
       context: context,
       position: RelativeRect.fromRect(
@@ -860,6 +970,21 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         Offset.zero & overlay.size,
       ),
       items: [
+        if (!isSavedMessagesChat)
+          const PopupMenuItem(
+            value: 'react',
+            child: Row(
+              children: [
+                Icon(
+                  Icons.add_reaction_outlined,
+                  size: 16,
+                  color: Colors.white70,
+                ),
+                SizedBox(width: 10),
+                Text('React'),
+              ],
+            ),
+          ),
         const PopupMenuItem(
           value: 'copy',
           child: Row(
@@ -902,7 +1027,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       elevation: 8,
     ).then((selectedValue) async {
       if (!mounted || selectedValue == null) return;
-      if (selectedValue == 'copy') {
+      if (selectedValue == 'react') {
+        Dialogs.showReactionPicker(
+          context: context,
+          onSelected: (emoji) => _toggleReaction(message, emoji),
+        );
+      } else if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1112,6 +1242,11 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   _showDynamicContextMenu(context, tapDetails!, m);
                 }
               },
+              // Double-tap/double-click is a shortcut for a 👍 reaction -
+              // no-op in Saved Messages, same as every other reaction path.
+              onDoubleTap: isSavedMessagesChat
+                  ? null
+                  : () => _toggleReaction(m, '👍'),
               child: Container(
                 margin: const EdgeInsets.symmetric(vertical: 4),
                 padding: const EdgeInsets.all(12),
@@ -1169,6 +1304,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                 ),
               ),
             ),
+            if (m.reactions.isNotEmpty) _buildReactionsRow(m, context),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               child: Row(
@@ -1193,6 +1329,114 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// A row of small pill-shaped chips beneath a message bubble, one per
+  /// emoji that's been reacted with, each showing the stacked avatars of
+  /// whoever reacted plus the emoji itself. Tapping a chip toggles *my*
+  /// reaction with that emoji (un-reacting if I'm already in it).
+  Widget _buildReactionsRow(ChatMessage m, BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 4),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: m.reactions.entries
+            .where((entry) => entry.value.isNotEmpty)
+            .map((entry) => _buildReactionChip(entry.key, entry.value, m, context))
+            .toList(),
+      ),
+    );
+  }
+
+  Widget _buildReactionChip(
+    String emoji,
+    Set<String> reactorKeys,
+    ChatMessage m,
+    BuildContext context,
+  ) {
+    final ThemeData theme = Theme.of(context);
+    final bool reactedByMe = reactorKeys.contains(_myRawPublicKey);
+    final List<String> ordered = reactorKeys.toList();
+    // Only stack avatars for up to 3 reactors so the chip doesn't grow
+    // unbounded once group chats are a thing; the trailing count covers
+    // the rest.
+    final int shownAvatars = ordered.length > 3 ? 3 : ordered.length;
+
+    return GestureDetector(
+      onTap: () => _toggleReaction(m, emoji),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+        decoration: BoxDecoration(
+          color: reactedByMe
+              ? theme.colorScheme.primary.withValues(alpha: 0.18)
+              : Colors.black26,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: reactedByMe ? theme.colorScheme.primary : Colors.white10,
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              height: 16,
+              width: 12.0 + (shownAvatars * 8.0),
+              child: Stack(
+                children: [
+                  for (int i = 0; i < shownAvatars; i++)
+                    Positioned(
+                      left: i * 8.0,
+                      child: _buildReactorAvatar(ordered[i], theme),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(emoji, style: const TextStyle(fontSize: 13)),
+            if (ordered.length > 1) ...[
+              const SizedBox(width: 3),
+              Text(
+                '${ordered.length}',
+                style: const TextStyle(color: Colors.white60, fontSize: 11),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A tiny circular initial-letter avatar for one reactor, built the same
+  /// way as the peer avatars in [CompactSidebar]/[ExpandedSidebar] so
+  /// reaction chips look consistent with the rest of the app.
+  Widget _buildReactorAvatar(String reactorKey, ThemeData theme) {
+    final bool isSelf = reactorKey == _myRawPublicKey;
+    final String label = isSelf
+        ? 'Y'
+        : (_selectedPeer != null && _selectedPeer!.nickname.isNotEmpty
+              ? _selectedPeer!.nickname[0].toUpperCase()
+              : '?');
+
+    return Container(
+      width: 16,
+      height: 16,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: theme.colorScheme.primary,
+        border: Border.all(color: const Color(0xFF141414), width: 1.5),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 8,
+          fontWeight: FontWeight.bold,
+          color: Colors.black,
         ),
       ),
     );

@@ -175,6 +175,7 @@ class StorageService {
     String? mediaKeyBase64,
     String? mediaIvBase64,
     String? localPath,
+    Map<String, Set<String>>? reactions,
   }) async {
     try {
       final box = await _getHistoryBox();
@@ -198,6 +199,9 @@ class StorageService {
         'mediaKeyBase64': mediaKeyBase64 ?? existing['mediaKeyBase64'],
         'mediaIvBase64': mediaIvBase64 ?? existing['mediaIvBase64'],
         'localPath': localPath ?? existing['localPath'],
+        'reactions': reactions != null
+            ? reactions.map((emoji, keys) => MapEntry(emoji, keys.toList()))
+            : existing['reactions'],
       };
 
       if (existingIndex != -1) {

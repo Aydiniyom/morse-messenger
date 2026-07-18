@@ -375,6 +375,51 @@ class Dialogs {
     );
   }
 
+  /// A small, fixed set of quick-reaction emojis - shown from the message
+  /// context menu's "React" option. [onSelected] fires once with the
+  /// chosen emoji; toggling add/remove is the caller's responsibility
+  /// (tapping an emoji you've already reacted with un-reacts).
+  static void showReactionPicker({
+    required BuildContext context,
+    required Function(String emoji) onSelected,
+  }) {
+    const emojis = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🐳'];
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('React', style: TextStyle(fontSize: 16)),
+        content: Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: emojis.map((emoji) {
+            return GestureDetector(
+              onTap: () {
+                Navigator.pop(ctx);
+                onSelected(emoji);
+              },
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(emoji, style: const TextStyle(fontSize: 26)),
+              ),
+            );
+          }).toList(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
   static void showAddPeer({
     required BuildContext context,
     required TextEditingController nameController,
