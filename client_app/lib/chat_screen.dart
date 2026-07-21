@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -64,6 +65,22 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   bool _isMobileSidebarExpanded = false;
   bool _isMessageEmpty = true;
 
+  /// True while a system UI (file picker, share sheet, etc.) is up on top
+  /// of us. Android reports that as us being "paused" just like real
+  /// backgrounding, so we use this to tell the two apart and avoid
+  /// dropping the relay connection for something the user didn't actually
+  /// leave the app for.
+  bool _isPickingFile = false;
+
+  /// Delays the actual disconnect after the app is backgrounded on mobile,
+  /// instead of dropping the connection the instant `paused` fires. A
+  /// short interruption (file picker, share sheet, a permission dialog,
+  /// quickly checking another app) resolves before this timer goes off,
+  /// so the socket - and any in-flight send - survives it. Only a
+  /// genuinely prolonged backgrounding results in a real disconnect.
+  Timer? _backgroundDisconnectTimer;
+  static const Duration _backgroundGracePeriod = Duration(seconds: 25);
+
   Set<String> _onlinePeers = {};
 
   @override
@@ -86,6 +103,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _backgroundDisconnectTimer?.cancel();
     _sessionManager?.disconnect();
     _msgFocusNode.dispose();
     _scrollController.dispose();
@@ -111,11 +129,31 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         state == AppLifecycleState.detached) {
       // ONLY force disconnect on mobile platforms when minimized/suspended
       if (isMobile) {
-        debugPrint("Mobile backgrounding detected: Securing session pipeline.");
-        _sessionManager?.disconnect();
+        // A file picker, share sheet, or similar system UI also reports
+        // as "paused" - don't tear the connection down for that, or any
+        // send already in flight (e.g. a media upload) fails the instant
+        // the picker opens.
+        if (_isPickingFile) {
+          debugPrint("Backgrounded for a system picker - keeping the connection alive.");
+          return;
+        }
+        debugPrint(
+          "Mobile backgrounding detected: keeping the connection alive for "
+          "${_backgroundGracePeriod.inSeconds}s in case this is brief.",
+        );
+        _backgroundDisconnectTimer?.cancel();
+        _backgroundDisconnectTimer = Timer(_backgroundGracePeriod, () {
+          debugPrint("Still backgrounded after the grace period: securing session pipeline.");
+          _sessionManager?.disconnect();
+        });
       }
     } else if (state == AppLifecycleState.resumed) {
-      // If we are on mobile and returning from a paused state, re-establish the connection
+      // We're back - cancel any pending disconnect from a backgrounding
+      // that turned out to be brief, and reconnect if the grace period
+      // already expired (or we were never connected to begin with).
+      _backgroundDisconnectTimer?.cancel();
+      _backgroundDisconnectTimer = null;
+
       if (isMobile && !(_sessionManager?.isServerConnected ?? false)) {
         _startSession();
       }
@@ -469,9 +507,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       return;
     }
 
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      withData: false, 
-    );
+    FilePickerResult? result;
+    setState(() => _isPickingFile = true);
+    try {
+      result = await FilePicker.platform.pickFiles(withData: false);
+    } finally {
+      // The picker returning is also roughly when Android reports us as
+      // "resumed" again, but this flag matters for the split-second
+      // window where didChangeAppLifecycleState's paused branch could
+      // otherwise still see it as true.
+      if (mounted) setState(() => _isPickingFile = false);
+    }
     if (result == null || result.files.isEmpty) return;
 
     final file = result.files.first;
@@ -518,41 +564,94 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     _msgController.clear();
     _scrollToBottom();
 
+    final Uint8List fileBytes;
     try {
-      final Uint8List fileBytes = await File(filePath).readAsBytes();
-      
-      if (tempMessage.isCancelled) return; 
+      fileBytes = await File(filePath).readAsBytes();
+    } catch (e) {
+      debugPrint('Failed to read picked file: $e');
+      setState(() => targetPeer.messages.remove(tempMessage));
+      return;
+    }
 
-      // Copy into our own permanent media cache. file_picker's returned
-      // path can point at an OS-managed temp/cache location that gets
-      // cleared out from under us (e.g. on low storage, or across app
-      // restarts on some platforms), which is why sent attachments could
-      // silently stop previewing after a while. Keeping our own copy
-      // (same as we already do for received media) fixes that.
-      String persistentLocalPath = filePath;
-      try {
-        final cacheDir = await StorageService.getMediaCacheDirectory();
-        final safeFileName = StorageService.sanitizeFileName(fileName);
-        final cachedFile = File('${cacheDir.path}/${msgId}_$safeFileName');
-        await cachedFile.writeAsBytes(fileBytes);
-        persistentLocalPath = cachedFile.path;
-      } catch (e) {
-        debugPrint('Failed to cache outgoing media locally, keeping picker path: $e');
+    if (tempMessage.isCancelled) return;
+
+    // Copy into our own permanent media cache. file_picker's returned
+    // path can point at an OS-managed temp/cache location that gets
+    // cleared out from under us (e.g. on low storage, or across app
+    // restarts on some platforms), which is why sent attachments could
+    // silently stop previewing after a while. Keeping our own copy
+    // (same as we already do for received media) fixes that, and also
+    // means a retry after a failed send doesn't depend on the picker's
+    // temp file still existing.
+    String persistentLocalPath = filePath;
+    try {
+      final cacheDir = await StorageService.getMediaCacheDirectory();
+      final safeFileName = StorageService.sanitizeFileName(fileName);
+      final cachedFile = File('${cacheDir.path}/${msgId}_$safeFileName');
+      await cachedFile.writeAsBytes(fileBytes);
+      persistentLocalPath = cachedFile.path;
+      tempMessage.localPath = persistentLocalPath;
+    } catch (e) {
+      debugPrint('Failed to cache outgoing media locally, keeping picker path: $e');
+    }
+
+    if (tempMessage.isCancelled) return;
+
+    await _deliverMediaMessage(
+      tempMessage: tempMessage,
+      targetPeer: targetPeer,
+      cleanedTargetKey: cleanedTargetKey,
+      msgId: msgId,
+      now: now,
+      caption: caption,
+      mediaType: mediaType,
+      fileName: fileName,
+      fileBytes: fileBytes,
+      persistentLocalPath: persistentLocalPath,
+    );
+  }
+
+  /// Encrypts, uploads, and delivers the metadata packet(s) for an
+  /// already-picked (and already locally-cached) attachment. Split out of
+  /// [_pickAndSendMedia] so [_retrySendMedia] can re-run just this part
+  /// without re-opening the file picker.
+  Future<void> _deliverMediaMessage({
+    required ChatMessage tempMessage,
+    required ChatPeer targetPeer,
+    required String cleanedTargetKey,
+    required String msgId,
+    required DateTime now,
+    required String caption,
+    required String mediaType,
+    required String fileName,
+    required Uint8List fileBytes,
+    required String persistentLocalPath,
+  }) async {
+    void onUploadProgress(double progress) {
+      if (tempMessage.isCancelled) {
+        throw Exception('Upload cancelled by user.');
       }
-
-      if (tempMessage.isCancelled) return;
-
-      void onUploadProgress(double progress) {
-        if (tempMessage.isCancelled) {
-          throw Exception('Upload cancelled by user.');
-        }
+      if (mounted) {
         setState(() {
           tempMessage.uploadProgress = progress;
         });
       }
+    }
+
+    try {
+      // The app may still be mid-reconnect right after resuming (e.g. the
+      // file picker's own delay pushed us past a brief backgrounding) -
+      // wait it out instead of racing it and failing immediately.
+      final bool connected = _sessionManager!.isServerConnected ||
+          await _sessionManager!.waitUntilConnected();
+      if (!connected) {
+        throw const SocketException('No connection to the relay server');
+      }
+
+      List<String> failedMembers = const [];
 
       if (targetPeer.isGroup) {
-        await _sessionManager!.sendGroupMediaMessage(
+        failedMembers = await _sessionManager!.sendGroupMediaMessage(
           memberKeys: targetPeer.groupMemberKeys,
           groupId: cleanedTargetKey,
           msgId: msgId,
@@ -563,6 +662,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           rawBytes: fileBytes,
           onProgress: onUploadProgress,
         );
+        // Every member failing means nothing actually went out - treat it
+        // as a full failure so it's retryable, rather than "delivered".
+        if (targetPeer.groupMemberKeys.isNotEmpty &&
+            failedMembers.length == targetPeer.groupMemberKeys.length) {
+          throw const SocketException('No connection to the relay server');
+        }
       } else {
         await _sessionManager!.sendMediaMessage(
           targetKey: cleanedTargetKey,
@@ -587,28 +692,98 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         localPath: persistentLocalPath,
       );
 
+      if (!mounted) return;
       setState(() {
         tempMessage.isTransferring = false;
+        tempMessage.sendFailed = false;
         tempMessage.uploadProgress = 1.0;
         tempMessage.localPath = persistentLocalPath;
       });
 
+      if (failedMembers.isNotEmpty && mounted) {
+        final int delivered = targetPeer.groupMemberKeys.length - failedMembers.length;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Delivered to $delivered of ${targetPeer.groupMemberKeys.length} '
+              'group members - ${failedMembers.length} did not receive it.',
+            ),
+          ),
+        );
+      }
     } catch (e) {
       debugPrint("Failed to process media output pipeline: $e");
+      if (!mounted) return;
       setState(() {
         tempMessage.isTransferring = false;
         tempMessage.uploadProgress = 0.0;
         if (tempMessage.isCancelled) {
           targetPeer.messages.remove(tempMessage);
+        } else {
+          tempMessage.sendFailed = true;
         }
       });
-      
+
       if (!tempMessage.isCancelled) {
+        final bool isConnectionIssue = e is SocketException || e is StateError;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to deliver attachment: $e')),
+          SnackBar(
+            content: Text(
+              isConnectionIssue
+                  ? 'No connection to the relay server - the attachment was not sent. Tap it to retry.'
+                  : 'Failed to deliver attachment: $e',
+            ),
+            action: SnackBarAction(
+              label: 'Retry',
+              onPressed: () => _retrySendMedia(tempMessage, targetPeer),
+            ),
+          ),
         );
       }
     }
+  }
+
+  /// User-triggered retry after [_deliverMediaMessage] failed. Re-reads
+  /// the already-cached local copy rather than re-opening the file
+  /// picker, so a failed group attachment (say, from a flaky connection)
+  /// can just be resent as-is.
+  void _retrySendMedia(ChatMessage m, ChatPeer targetPeer) async {
+    if (_sessionManager == null) return;
+    if (m.localPath == null || m.localPath!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Original file is no longer available.')),
+      );
+      return;
+    }
+
+    final cachedFile = File(m.localPath!);
+    if (!await cachedFile.exists()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Original file is no longer available.')),
+      );
+      return;
+    }
+
+    setState(() {
+      m.sendFailed = false;
+      m.isTransferring = true;
+      m.uploadProgress = 0.05;
+    });
+
+    final Uint8List bytes = await cachedFile.readAsBytes();
+    await _deliverMediaMessage(
+      tempMessage: m,
+      targetPeer: targetPeer,
+      cleanedTargetKey: targetPeer.rawPublicKey.trim(),
+      msgId: m.id,
+      now: m.timestamp,
+      caption: m.text,
+      mediaType: m.mediaType ?? 'document',
+      fileName: m.mediaFileName ?? 'file',
+      fileBytes: bytes,
+      persistentLocalPath: m.localPath!,
+    );
   }
 
   void _processFriendRequest(String senderPublicKey) {
@@ -1456,6 +1631,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         _selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey;
 
     try {
+      List<String> failedMembers = const [];
+
       if (isSavedMessagesChat) {
         // Saved Messages has no one on the other end to send to - it's a
         // local notebook, so just persist it. No network call at all.
@@ -1465,13 +1642,25 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           timestampIso: newMsg.timestamp.toIso8601String(),
         );
       } else if (_selectedPeer!.isGroup) {
-        await _sessionManager!.sendGroupMessage(
+        // The app may still be mid-reconnect (e.g. right after resuming
+        // from a brief backgrounding) - wait it out instead of racing it.
+        final bool connected = (_sessionManager?.isServerConnected ?? false) ||
+            await _sessionManager!.waitUntilConnected();
+        if (!connected) {
+          throw const SocketException('No connection to the relay server');
+        }
+
+        failedMembers = await _sessionManager!.sendGroupMessage(
           memberKeys: _selectedPeer!.groupMemberKeys,
           groupId: _selectedPeer!.rawPublicKey,
           text: text,
           msgId: newMsg.id,
           timestamp: newMsg.timestamp,
         );
+        if (_selectedPeer!.groupMemberKeys.isNotEmpty &&
+            failedMembers.length == _selectedPeer!.groupMemberKeys.length) {
+          throw const SocketException('No connection to the relay server');
+        }
 
         await StorageService.persistEncryptedMessage(
           peerPublicKey: _selectedPeer!.rawPublicKey,
@@ -1481,6 +1670,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           timestampIso: newMsg.timestamp.toIso8601String(),
         );
       } else {
+        final bool connected = (_sessionManager?.isServerConnected ?? false) ||
+            await _sessionManager!.waitUntilConnected();
+        if (!connected) {
+          throw const SocketException('No connection to the relay server');
+        }
+
         await _sessionManager!.sendChatMessage(
           targetKey: _selectedPeer!.rawPublicKey.trim(),
           text: text,
@@ -1505,10 +1700,31 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _msgController.clear();
       _scrollToBottom();
       _msgFocusNode.requestFocus();
+
+      if (failedMembers.isNotEmpty && mounted) {
+        final int delivered =
+            _selectedPeer!.groupMemberKeys.length - failedMembers.length;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Delivered to $delivered of ${_selectedPeer!.groupMemberKeys.length} '
+              'group members - ${failedMembers.length} did not receive it.',
+            ),
+          ),
+        );
+      }
     } catch (e) {
+      debugPrint('Failed to send message: $e');
+      final bool isConnectionIssue = e is SocketException || e is StateError;
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Failed to deliver message: Connection inactive.'),
+          content: Text(
+            isConnectionIssue
+                ? 'No connection to the relay server - message not sent. Your text is still in the box, try again once reconnected.'
+                : 'Failed to deliver message: $e',
+          ),
+          action: SnackBarAction(label: 'Retry', onPressed: _sendMessage),
         ),
       );
     }
@@ -2414,6 +2630,32 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               Expanded(
                 child: Text(
                   'Download failed - tap to retry',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (m.sendFailed && m.isMe && _selectedPeer != null) {
+      return GestureDetector(
+        onTap: () => _retrySendMedia(m, _selectedPeer!),
+        child: Container(
+          width: 200,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.error_outline_rounded, color: Colors.redAccent),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Send failed - tap to retry',
                   style: const TextStyle(color: Colors.white70, fontSize: 12),
                 ),
               ),

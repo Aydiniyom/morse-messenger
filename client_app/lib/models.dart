@@ -21,6 +21,13 @@ class ChatMessage {
 
   bool downloadFailed;
 
+  /// True if this is an outgoing message (text or media) whose delivery
+  /// failed - most commonly because the relay connection dropped mid-send
+  /// (e.g. the app was briefly backgrounded by the OS file picker). Lets
+  /// the UI show a clear "tap to retry" affordance instead of the message
+  /// silently vanishing or looking sent when it wasn't.
+  bool sendFailed;
+
   Map<String, Set<String>> reactions;
 
   final String? senderKey;
@@ -49,6 +56,7 @@ class ChatMessage {
     this.isTransferring = false,
     this.isCancelled = false,
     this.downloadFailed = false,
+    this.sendFailed = false,
     Map<String, Set<String>>? reactions,
     this.senderKey,
     Set<String>? readByKeys,

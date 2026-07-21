@@ -175,6 +175,31 @@ class ChatSessionManager {
   final Set<String> _onlinePeers = {};
   Set<String> get onlinePeers => _onlinePeers;
 
+  /// Resolves once the socket is actually connected, or `false` if
+  /// [timeout] elapses first. Exists so send paths that fire right after
+  /// the app resumes (e.g. right after the OS file picker briefly
+  /// backgrounded us) can wait out an in-flight reconnect instead of
+  /// racing it and throwing immediately.
+  Future<bool> waitUntilConnected({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (isServerConnected) return true;
+
+    // Not connected and not even trying (e.g. manually disconnected, or
+    // the reconnect timer hasn't fired yet) - kick off a connection
+    // attempt ourselves rather than waiting on nothing.
+    if (!isConnecting) {
+      initializeWebSocket();
+    }
+
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (isServerConnected) return true;
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+    return isServerConnected;
+  }
+
   // --- connection lifecycle ---------------------------------------------
 
   void initializeWebSocket() async {
@@ -855,8 +880,13 @@ class ChatSessionManager {
   /// addressed individually and each carrying the same [groupId] and
   /// [msgId] in its plaintext so every recipient can file it under the
   /// same conversation. One member's copy failing to encrypt/send (e.g. a
-  /// malformed key) doesn't stop delivery to the rest.
-  Future<void> sendGroupMessage({
+  /// malformed key, or the socket dropping mid-loop) doesn't stop delivery
+  /// to the rest.
+  ///
+  /// Returns the raw public keys of any members delivery failed for (empty
+  /// if everyone got it), so the caller can decide how to surface partial
+  /// failures instead of them being silently swallowed.
+  Future<List<String>> sendGroupMessage({
     required List<String> memberKeys,
     required String groupId,
     required String text,
@@ -872,6 +902,8 @@ class ChatSessionManager {
       'msgId': msgId,
       'timestamp': timestamp.toIso8601String(),
     });
+
+    final List<String> failedMembers = [];
 
     for (final memberKey in memberKeys) {
       try {
@@ -891,8 +923,11 @@ class ChatSessionManager {
         );
       } catch (e) {
         debugPrint('Failed to deliver group message to a member: $e');
+        failedMembers.add(memberKey);
       }
     }
+
+    return failedMembers;
   }
 
   /// Sends a media attachment to every member of a group.
@@ -902,7 +937,13 @@ class ChatSessionManager {
   /// does. Only the small metadata packet (caption, media ID, AES key/IV)
   /// is repeated, once per member, the same way [sendGroupMessage] repeats
   /// a text message.
-  Future<void> sendGroupMediaMessage({
+  ///
+  /// Returns the raw public keys of any members delivery failed for (empty
+  /// if everyone got it). The upload itself (which happens once, before
+  /// any per-member packet goes out) is NOT covered by this - a failure
+  /// there throws directly, since without it nobody could receive the
+  /// attachment at all.
+  Future<List<String>> sendGroupMediaMessage({
     required List<String> memberKeys,
     required String groupId,
     required String msgId,
@@ -927,6 +968,8 @@ class ChatSessionManager {
     );
 
     onProgress?.call(0.7);
+
+    final List<String> failedMembers = [];
 
     for (final memberKey in memberKeys) {
       try {
@@ -959,10 +1002,12 @@ class ChatSessionManager {
         );
       } catch (e) {
         debugPrint('Failed to deliver group attachment to a member: $e');
+        failedMembers.add(memberKey);
       }
     }
 
     onProgress?.call(1.0);
+    return failedMembers;
   }
 
   /// Downloads and decrypts the media referenced by an already-decrypted
