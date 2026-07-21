@@ -289,6 +289,12 @@ func (h *hub) pruneExpiredQueues(ctx context.Context) {
 // HTTP POST/GET instead of stuffing base64 into a WebSocket JSON packet
 // avoids the ~33% base64 blow-up and lets both ends stream the raw bytes
 // instead of buffering an entire base64 string in memory.
+//
+// A blob is retained until mediaTTL expires (see pruneExpired) instead of
+// being deleted the moment it's first downloaded. A group attachment is
+// uploaded exactly once and every member fetches that same ID
+// independently, so deleting on first read would leave every member but
+// whoever downloaded it first with a permanently broken attachment.
 type mediaStore struct {
 	dir string
 
@@ -413,16 +419,6 @@ func (s *mediaStore) open(id string) (*os.File, bool) {
 	return f, true
 }
 
-// delete removes a media blob, e.g. once it has been successfully
-// delivered to its recipient. Best-effort - relay is store-and-forward for
-// a single recipient, not a durable archive.
-func (s *mediaStore) delete(id string) {
-	s.mu.Lock()
-	delete(s.expires, id)
-	s.mu.Unlock()
-	_ = os.Remove(s.path(id))
-}
-
 // pruneExpired periodically removes blobs whose recipient never fetched
 // them, so abandoned uploads don't accumulate on disk forever. Run as a
 // background goroutine, mirroring hub.pruneExpiredQueues.
@@ -491,9 +487,10 @@ func (s *mediaStore) handleUpload(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp)
 }
 
-// handleDownload streams a previously uploaded blob back to the caller and
-// then deletes it - the relay is single-recipient store-and-forward, not a
-// durable file host.
+// handleDownload streams a previously uploaded blob back to the caller.
+// The blob is left in place (not deleted on read) since it may still be
+// downloaded again by other group members, and simply expires on its own
+// via pruneExpired once mediaTTL elapses.
 func (s *mediaStore) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -516,10 +513,7 @@ func (s *mediaStore) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if _, err := io.Copy(w, f); err != nil {
 		log.Printf("media download for %s... interrupted: %v", safePrefix(id, 8), err)
-		return
 	}
-
-	s.delete(id)
 }
 
 // --- connection handling -------------------------------------------------

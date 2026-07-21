@@ -13,6 +13,10 @@ class ExpandedSidebar extends StatelessWidget {
   final VoidCallback onAboutPressed;
   final Function(ChatPeer) onSelectPeer;
 
+  /// Fired on long-pressing a peer tile - lets the caller offer to copy
+  /// that contact's public key (e.g. to add them to a group's allow-list).
+  final Function(ChatPeer)? onPeerLongPress;
+
   const ExpandedSidebar({
     super.key,
     required this.peers,
@@ -23,6 +27,7 @@ class ExpandedSidebar extends StatelessWidget {
     required this.onSettingsPressed,
     required this.onAboutPressed,
     required this.onSelectPeer,
+    this.onPeerLongPress,
   });
 
   @override
@@ -119,19 +124,24 @@ class ExpandedSidebar extends StatelessWidget {
               ),
             ),
           ),
-          Positioned(
-            right: 0,
-            bottom: 0,
-            child: Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                color: isOnline ? theme.colorScheme.primary : Color.fromARGB(255, 66, 66, 66),
-                shape: BoxShape.circle,
-                border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+          // Online/offline only means something for a single 1:1 contact -
+          // a group chat has no one singular presence to reflect, so it's
+          // omitted for group entries entirely rather than always showing
+          // a misleading "offline" dot.
+          if (!p.isGroup)
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                width: 12,
+                height: 12,
+                decoration: BoxDecoration(
+                  color: isOnline ? theme.colorScheme.primary : Color.fromARGB(255, 66, 66, 66),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF1A1A1A), width: 2),
+                ),
               ),
             ),
-          ),
         ],
       ),
       title: Text(p.isPending
@@ -142,6 +152,7 @@ class ExpandedSidebar extends StatelessWidget {
         ),
       ),
       onTap: () => onSelectPeer(p),
+      onLongPress: onPeerLongPress != null ? () => onPeerLongPress!(p) : null,
     );
   }
 

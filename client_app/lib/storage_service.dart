@@ -210,6 +210,7 @@ class StorageService {
     required String encryptedPayload,
     required bool isMe,
     required String timestampIso,
+    bool? isRead,
     String? mediaType,
     String? mediaFileName,
     String? mediaId,
@@ -217,6 +218,8 @@ class StorageService {
     String? mediaIvBase64,
     String? localPath,
     Map<String, Set<String>>? reactions,
+    Set<String>? readByKeys,
+    String? senderKey,
   }) async {
     try {
       final box = await _getHistoryBox();
@@ -233,7 +236,15 @@ class StorageService {
         'isMe': isMe,
         'payload': encryptedPayload,
         'timestamp': timestampIso,
-        'isRead': isMe,
+        // Preserve whatever read state was already persisted unless the
+        // caller is explicitly reporting a change, and otherwise default
+        // to "not read yet" for a brand new record. This used to be
+        // hardcoded to `isMe`, which silently threw away the real read
+        // status on every unrelated update (e.g. a reaction), made every
+        // received message look "unread" again after any restart, and
+        // made every message *I* sent look already "read" by the
+        // recipient the instant it was saved.
+        'isRead': isRead ?? (existing['isRead'] as bool? ?? false),
         'mediaType': mediaType ?? existing['mediaType'],
         'mediaFileName': mediaFileName ?? existing['mediaFileName'],
         'mediaId': mediaId ?? existing['mediaId'],
@@ -243,6 +254,10 @@ class StorageService {
         'reactions': reactions != null
             ? reactions.map((emoji, keys) => MapEntry(emoji, keys.toList()))
             : existing['reactions'],
+        'readByKeys': readByKeys != null
+            ? readByKeys.toList()
+            : existing['readByKeys'],
+        'senderKey': senderKey ?? existing['senderKey'],
       };
 
       if (existingIndex != -1) {
@@ -421,15 +436,49 @@ class StorageService {
   /// [fileName] and returns the full path written to. Shared by every
   /// media preview (image/audio/video/document) so "save to device" only
   /// has one implementation to get right.
+  ///
+  /// [fileName] is sanitized first since it can originate from a remote
+  /// peer's `mediaFileName` - without that, a peer could send something
+  /// like `"../../../../some/other/app/file"` and write outside the
+  /// downloads folder entirely.
   static Future<String> saveBytesToDownloads(
     String fileName,
     List<int> bytes,
   ) async {
     final targetDir = await getPublicDownloadsDirectory();
-    final savePath = '${targetDir.path}/$fileName';
+    final savePath = '${targetDir.path}/${sanitizeFileName(fileName)}';
     final file = File(savePath);
     await file.writeAsBytes(bytes);
     return savePath;
+  }
+
+  /// Reduces a (possibly attacker-controlled, e.g. a filename a remote
+  /// peer attached to a media message) string down to a single safe path
+  /// segment: no directory traversal, no absolute paths, no separators of
+  /// either flavor, and no unexpected characters. Always returns something
+  /// non-empty and usable, falling back to [fallback] if nothing safe is
+  /// left after stripping.
+  static String sanitizeFileName(String? rawName, {String fallback = 'attachment'}) {
+    final name = (rawName ?? '').trim();
+    if (name.isEmpty) return fallback;
+
+    // Keep only the final path segment, regardless of which platform's
+    // separator (or both) the string used - this alone defeats
+    // "../../etc/passwd"-style traversal and absolute paths.
+    final lastSegment = name.split(RegExp(r'[\\/]')).last.trim();
+    if (lastSegment.isEmpty || lastSegment == '.' || lastSegment == '..') {
+      return fallback;
+    }
+
+    // Drop anything outside a conservative, cross-platform-safe character
+    // set so the name can't smuggle in null bytes, alternate separators,
+    // or other filesystem-special characters.
+    final cleaned = lastSegment.replaceAll(RegExp(r'[^A-Za-z0-9 ._-]'), '_');
+    if (cleaned.isEmpty || cleaned == '.' || cleaned == '..') return fallback;
+
+    // Bound the length so it can't be used to blow past filesystem
+    // path-length limits either.
+    return cleaned.length > 200 ? cleaned.substring(0, 200) : cleaned;
   }
 
   static Future<Directory> getMediaCacheDirectory() async {

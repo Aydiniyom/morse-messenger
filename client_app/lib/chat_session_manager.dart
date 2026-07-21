@@ -59,6 +59,79 @@ class ChatSessionManager {
   )
   onGroupMessageReceived;
 
+  /// Fires when a group member confirms they've read one of my group
+  /// messages. Mirrors [onReadReceiptReceived], just scoped to a group.
+  final void Function(String senderKey, String groupId, String msgId)
+  onGroupReadReceiptReceived;
+
+  /// Fires when a group member tells us to remove one of their messages
+  /// (or one of ours) from a group's history - "delete for everyone",
+  /// same idea as [onMessageDeleted] but scoped to a group.
+  final void Function(String senderKey, String groupId, String msgId)
+  onGroupMessageDeleted;
+
+  /// Fires on the group's introducer device when someone asks to join.
+  /// [requesterKey] is cryptographically authenticated (it's the envelope's
+  /// verified sender), but whether they're actually allowed in is the
+  /// caller's job to check against the group's allow-list.
+  final void Function(String requesterKey, String groupId, String secret)
+  onGroupJoinRequestReceived;
+
+  /// Fires on the joiner's device once the introducer has verified the
+  /// invite secret and the allow-list and admitted them. [memberKeys] is
+  /// every other current member (not including the joiner), and
+  /// [allowedJoinerKeys] is the introducer's authoritative allow-list at
+  /// the time of admission, so the joiner's local copy starts in sync
+  /// instead of empty.
+  final void Function(
+    String groupId,
+    List<String> memberKeys,
+    String groupName,
+    List<String> allowedJoinerKeys,
+  )
+  onGroupJoinAccepted;
+
+  /// Fires on the joiner's device if the introducer rejected the join
+  /// request (bad secret, or the joiner's key isn't allow-listed).
+  final void Function(String groupId) onGroupJoinRejected;
+
+  /// Fires on an existing member's device when the introducer admits a new
+  /// member, so every current member's local roster stays in sync with who
+  /// can actually send/receive in the group.
+  final void Function(String groupId, String newMemberKey) onGroupMemberAdded;
+
+  /// Fires on the introducer's device when any current member (including
+  /// itself) asks to extend or shrink the allow-list. The introducer is
+  /// the sole source of truth for the allow-list precisely so every
+  /// member's displayed count/contents can't drift apart - anyone else
+  /// receiving this can safely ignore it.
+  final void Function(
+    String requesterKey,
+    String groupId,
+    List<String> addKeys,
+    List<String> removeKeys,
+  )
+  onGroupAllowListChangeRequestReceived;
+
+  /// Fires on every current (non-removed) member's device after the
+  /// introducer processes an allow-list change. [allowedJoinerKeys] is the
+  /// full authoritative list (replaces the local copy outright, rather
+  /// than being merged, so a member who missed an earlier update can't
+  /// stay stuck with stale data), and [removedMemberKeys] is anyone who
+  /// was just kicked (their key was on the allow-list *and* was a current
+  /// member) so recipients can prune their own membership roster too.
+  final void Function(
+    String groupId,
+    List<String> allowedJoinerKeys,
+    List<String> removedMemberKeys,
+  )
+  onGroupAllowListSyncReceived;
+
+  /// Fires on a removed member's own device: the introducer took them off
+  /// the allow-list while they were a member, so they're being kicked from
+  /// the group entirely.
+  final void Function(String groupId) onGroupKicked;
+
   ChatSessionManager({
     required this.serverIp,
     required this.myRawPublicKey,
@@ -72,6 +145,15 @@ class ChatSessionManager {
     required this.onMessageDeleted,
     required this.onReactionReceived,
     required this.onGroupMessageReceived,
+    required this.onGroupReadReceiptReceived,
+    required this.onGroupMessageDeleted,
+    required this.onGroupJoinRequestReceived,
+    required this.onGroupJoinAccepted,
+    required this.onGroupJoinRejected,
+    required this.onGroupMemberAdded,
+    required this.onGroupAllowListChangeRequestReceived,
+    required this.onGroupAllowListSyncReceived,
+    required this.onGroupKicked,
   });
 
   // --- connection state -----------------------------------------------
@@ -279,6 +361,303 @@ class ChatSessionManager {
       );
     } catch (e) {
       debugPrint('Failed to send delete notice: $e');
+    }
+  }
+
+  /// Like [sendReadReceipt], but tags the receipt with [groupId] so the
+  /// original sender can track per-message read state across every member
+  /// instead of just a single yes/no.
+  void sendGroupReadReceipt(String targetKey, String groupId, String messageId) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({
+        'isReceipt': true,
+        'isGroupMessage': true,
+        'groupId': groupId,
+        'msgId': messageId,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send group read receipt: $e');
+    }
+  }
+
+  /// "Delete for everyone" for a group message: sends a delete notice,
+  /// individually, to every current member - same fan-out pattern as
+  /// [sendGroupMessage]. One member's copy failing doesn't stop the rest.
+  void sendGroupDeleteNotice(
+    List<String> memberKeys,
+    String groupId,
+    String messageId,
+  ) {
+    for (final memberKey in memberKeys) {
+      try {
+        final recipient = RSAPublicKey.fromString(memberKey.trim());
+        final plaintext = jsonEncode({
+          'isDelete': true,
+          'isGroupMessage': true,
+          'groupId': groupId,
+          'msgId': messageId,
+        });
+        final envelope = CryptoService.encryptEnvelope(
+          plaintext: plaintext,
+          recipientPublicKey: recipient,
+          senderPrivateKey: privKey,
+        );
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to send group delete notice to a member: $e');
+      }
+    }
+  }
+
+  /// Asks [introducerKey] (embedded in the invite code) to admit us into
+  /// the group. The introducer verifies [secret] against the group's
+  /// invite secret and checks our (cryptographically authenticated) key
+  /// against its allow-list before responding.
+  void sendGroupJoinRequest(String introducerKey, String groupId, String secret) {
+    try {
+      final recipient = RSAPublicKey.fromString(introducerKey.trim());
+      final plaintext = jsonEncode({
+        'isGroupJoinRequest': true,
+        'groupId': groupId,
+        'secret': secret,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: introducerKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send group join request: $e');
+    }
+  }
+
+  /// Introducer -> joiner: admits them, handing back the current member
+  /// roster, the group's local name, and the authoritative allow-list so
+  /// their client can populate it.
+  void sendGroupJoinAccepted({
+    required String targetKey,
+    required String groupId,
+    required List<String> memberKeys,
+    required String groupName,
+    required List<String> allowedJoinerKeys,
+  }) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({
+        'isGroupJoinAccepted': true,
+        'groupId': groupId,
+        'groupName': groupName,
+        'memberKeys': memberKeys,
+        'allowedJoinerKeys': allowedJoinerKeys,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send group join acceptance: $e');
+    }
+  }
+
+  /// Introducer -> joiner: rejects the request (bad secret, or the
+  /// requester's key isn't on the allow-list).
+  void sendGroupJoinRejected(String targetKey, String groupId) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({
+        'isGroupJoinRejected': true,
+        'groupId': groupId,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send group join rejection: $e');
+    }
+  }
+
+  /// Introducer -> every other existing member: tells them a new member
+  /// was admitted, so their local roster grows to match - otherwise the
+  /// new member's messages would get silently dropped by everyone except
+  /// the introducer (see the membership check in `onGroupMessageReceived`).
+  void sendGroupMemberAdded(
+    List<String> memberKeys,
+    String groupId,
+    String newMemberKey,
+  ) {
+    for (final memberKey in memberKeys) {
+      try {
+        final recipient = RSAPublicKey.fromString(memberKey.trim());
+        final plaintext = jsonEncode({
+          'isGroupMemberAdded': true,
+          'groupId': groupId,
+          'newMemberKey': newMemberKey,
+        });
+        final envelope = CryptoService.encryptEnvelope(
+          plaintext: plaintext,
+          recipientPublicKey: recipient,
+          senderPrivateKey: privKey,
+        );
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to notify a member about the new joiner: $e');
+      }
+    }
+  }
+
+  /// Any member -> introducer: asks to extend or shrink the allow-list.
+  /// The introducer alone decides whether/how to apply it and is
+  /// responsible for re-syncing everyone afterwards - this message doesn't
+  /// change anything by itself.
+  void sendGroupAllowListChangeRequest({
+    required String introducerKey,
+    required String groupId,
+    required List<String> addKeys,
+    required List<String> removeKeys,
+  }) {
+    try {
+      final recipient = RSAPublicKey.fromString(introducerKey.trim());
+      final plaintext = jsonEncode({
+        'isGroupAllowListChangeRequest': true,
+        'groupId': groupId,
+        'addKeys': addKeys,
+        'removeKeys': removeKeys,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: introducerKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send allow-list change request: $e');
+    }
+  }
+
+  /// Introducer -> every remaining current member: the authoritative,
+  /// full allow-list after a change, plus anyone who was just kicked (was
+  /// removed from the allow-list while still a member) so recipients can
+  /// prune their own membership roster too. Always a full replacement,
+  /// never a merge, so a member who missed an earlier update self-corrects
+  /// instead of drifting further out of sync.
+  void sendGroupAllowListSync(
+    List<String> memberKeys,
+    String groupId,
+    List<String> allowedJoinerKeys,
+    List<String> removedMemberKeys,
+  ) {
+    for (final memberKey in memberKeys) {
+      try {
+        final recipient = RSAPublicKey.fromString(memberKey.trim());
+        final plaintext = jsonEncode({
+          'isGroupAllowListSync': true,
+          'groupId': groupId,
+          'allowedJoinerKeys': allowedJoinerKeys,
+          'removedMemberKeys': removedMemberKeys,
+        });
+        final envelope = CryptoService.encryptEnvelope(
+          plaintext: plaintext,
+          recipientPublicKey: recipient,
+          senderPrivateKey: privKey,
+        );
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to broadcast allow-list sync to a member: $e');
+      }
+    }
+  }
+
+  /// Introducer -> the removed member specifically: tells them they've
+  /// been kicked (their key was pulled off the allow-list while they were
+  /// still a member), so their client removes the group locally.
+  void sendGroupKicked(String targetKey, String groupId) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({'isGroupKicked': true, 'groupId': groupId});
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send kick notice: $e');
     }
   }
 
@@ -691,16 +1070,123 @@ class ChatSessionManager {
       return;
     }
 
-    if (payloadMap['isGroupMessage'] == true) {
+    if (payloadMap['isGroupJoinRequest'] == true) {
       final groupId = payloadMap['groupId'];
-      if (groupId is String) {
-        onGroupMessageReceived(
-          packet.fromUser,
+      final secret = payloadMap['secret'];
+      if (groupId is String && secret is String) {
+        onGroupJoinRequestReceived(packet.fromUser, groupId, secret);
+      }
+      return;
+    }
+
+    if (payloadMap['isGroupJoinAccepted'] == true) {
+      final groupId = payloadMap['groupId'];
+      final groupName = payloadMap['groupName'];
+      final memberKeys = payloadMap['memberKeys'];
+      final allowedJoinerKeys = payloadMap['allowedJoinerKeys'];
+      if (groupId is String &&
+          groupName is String &&
+          memberKeys is List &&
+          allowedJoinerKeys is List) {
+        onGroupJoinAccepted(
           groupId,
-          (payloadMap['text'] as String?) ?? '',
-          payloadMap,
+          memberKeys.whereType<String>().toList(),
+          groupName,
+          allowedJoinerKeys.whereType<String>().toList(),
         );
       }
+      return;
+    }
+
+    if (payloadMap['isGroupJoinRejected'] == true) {
+      final groupId = payloadMap['groupId'];
+      if (groupId is String) {
+        onGroupJoinRejected(groupId);
+      }
+      return;
+    }
+
+    if (payloadMap['isGroupMemberAdded'] == true) {
+      final groupId = payloadMap['groupId'];
+      final newMemberKey = payloadMap['newMemberKey'];
+      if (groupId is String && newMemberKey is String) {
+        onGroupMemberAdded(groupId, newMemberKey);
+      }
+      return;
+    }
+
+    if (payloadMap['isGroupAllowListChangeRequest'] == true) {
+      final groupId = payloadMap['groupId'];
+      final addKeys = payloadMap['addKeys'];
+      final removeKeys = payloadMap['removeKeys'];
+      if (groupId is String && addKeys is List && removeKeys is List) {
+        onGroupAllowListChangeRequestReceived(
+          packet.fromUser,
+          groupId,
+          addKeys.whereType<String>().toList(),
+          removeKeys.whereType<String>().toList(),
+        );
+      }
+      return;
+    }
+
+    if (payloadMap['isGroupAllowListSync'] == true) {
+      final groupId = payloadMap['groupId'];
+      final allowedJoinerKeys = payloadMap['allowedJoinerKeys'];
+      final removedMemberKeys = payloadMap['removedMemberKeys'];
+      if (groupId is String &&
+          allowedJoinerKeys is List &&
+          removedMemberKeys is List) {
+        onGroupAllowListSyncReceived(
+          groupId,
+          allowedJoinerKeys.whereType<String>().toList(),
+          removedMemberKeys.whereType<String>().toList(),
+        );
+      }
+      return;
+    }
+
+    if (payloadMap['isGroupKicked'] == true) {
+      final groupId = payloadMap['groupId'];
+      if (groupId is String) {
+        onGroupKicked(groupId);
+      }
+      return;
+    }
+
+    // Group text/media messages, deletes, and receipts all set
+    // `isGroupMessage: true` - a plain chat message routes to
+    // [onGroupMessageReceived], while a delete/receipt that also carries
+    // `groupId` routes to its group-scoped counterpart instead of the 1:1
+    // one below. Checked in this order so a group delete/receipt (which
+    // also sets `isDelete`/`isReceipt`) doesn't fall through to the 1:1
+    // handlers.
+    if (payloadMap['isGroupMessage'] == true) {
+      final groupId = payloadMap['groupId'];
+      if (groupId is! String) return;
+
+      if (payloadMap['isDelete'] == true) {
+        final msgId = payloadMap['msgId'];
+        if (msgId is String) {
+          onGroupMessageDeleted(packet.fromUser, groupId, msgId);
+        }
+        return;
+      }
+
+      if (payloadMap['isReceipt'] == true) {
+        final msgId = payloadMap['msgId'];
+        if (msgId is String) {
+          onGroupReadReceiptReceived(packet.fromUser, groupId, msgId);
+        }
+        return;
+      }
+
+      onGroupMessageReceived(
+        packet.fromUser,
+        groupId,
+        (payloadMap['text'] as String?) ?? '',
+        payloadMap,
+      );
       return;
     }
 

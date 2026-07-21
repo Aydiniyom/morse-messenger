@@ -10,10 +10,6 @@ class ChatMessage {
   final String? mediaType;
   final String? mediaFileName;
 
-  /// Identifies the encrypted blob on the relay's HTTP media store, plus
-  /// the AES-256-GCM key/IV needed to decrypt it after downloading. These
-  /// are what let media be fetched (or re-fetched, if the local cache was
-  /// cleared) instead of ever needing to travel embedded in a packet.
   final String? mediaId;
   final String? mediaKeyBase64;
   final String? mediaIvBase64;
@@ -23,26 +19,20 @@ class ChatMessage {
   bool isTransferring;
   bool isCancelled;
 
-  /// True if the most recent attempt to download+decrypt this message's
-  /// media failed (network error, expired relay copy, tampering, ...), so
-  /// the UI can offer a retry instead of silently showing nothing.
   bool downloadFailed;
 
-  /// Emoji reactions on this message, keyed by the emoji itself, with each
-  /// value being the set of raw public keys of everyone who reacted with
-  /// that emoji. A single reactor key can appear under multiple emojis (you
-  /// can stack more than one reaction onto the same message), and each
-  /// emoji can carry multiple reactor keys - so this already generalizes to
-  /// group chats without any format change, even though today there's only
-  /// ever "me" and one peer to populate it.
   Map<String, Set<String>> reactions;
 
-  /// Raw public key of whoever actually sent this message, when it's known
-  /// and different from a simple "me vs. the one peer I'm talking to"
-  /// relationship - i.e. for group messages, where a bubble can come from
-  /// any member. Null for every 1:1 message and for anything you sent
-  /// yourself; the UI only shows a sender label when this is set.
   final String? senderKey;
+
+  /// For a group message I sent (`isMe == true` on a group chat), the raw
+  /// public keys of every other member who has sent back a read receipt
+  /// for it. A group has more than one "other side", so unlike a 1:1 chat
+  /// a single [isRead] bool can't represent the read state - the UI
+  /// instead treats the message as fully read once this set covers every
+  /// other current member. Unused (stays empty) for 1:1 messages and for
+  /// messages that aren't mine.
+  Set<String> readByKeys;
 
   ChatMessage(
     this.text,
@@ -61,9 +51,11 @@ class ChatMessage {
     this.downloadFailed = false,
     Map<String, Set<String>>? reactions,
     this.senderKey,
+    Set<String>? readByKeys,
   }) : timestamp = customTime ?? DateTime.now(),
        isRead = false,
        reactions = reactions ?? {},
+       readByKeys = readByKeys ?? {},
        id =
            customId ??
            "${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(10000)}";
@@ -81,17 +73,43 @@ class ChatPeer {
   /// True if this entry represents a group chat rather than a 1:1 contact.
   /// When true, [rawPublicKey] holds the group's locally-generated ID
   /// (not an RSA public key) and [groupMemberKeys] holds the raw public
-  /// keys of every other member - everything needed to encrypt a message
-  /// once per member, the same way a 1:1 message is encrypted once for its
-  /// one recipient.
+  /// keys of every other member.
   final bool isGroup;
-  final List<String> groupMemberKeys;
+  List<String> groupMemberKeys;
+
+  /// Public keys explicitly permitted to join this group. Anyone already a
+  /// member can extend this list from the group settings dialog (long
+  /// press the group name). It's what [groupIntroducerKey]'s device checks
+  /// a `groupJoinRequest` against before admitting a new member. Meaningless
+  /// for 1:1 peers.
+  List<String> allowedJoinerKeys;
+
+  /// A random, per-group secret that - together with [rawPublicKey] (the
+  /// group ID) - makes up the invite code. It never changes and is always
+  /// viewable/copyable from the group settings dialog, unlike the old
+  /// invite codes this replaces, which had to be regenerated every time
+  /// membership changed because they embedded the entire member list.
+  /// Knowing the secret is necessary but not sufficient to join - the
+  /// joiner's key must also be on [allowedJoinerKeys] - so leaking the
+  /// invite code alone doesn't let a stranger in.
+  String? groupInviteSecret;
+
+  /// The member whose device actually evaluates join requests (verifies
+  /// the secret, checks the allow-list, and admits new members). Always
+  /// the group's creator in this implementation, and embedded in the
+  /// invite code so a joiner knows who to address their request to.
+  String? groupIntroducerKey;
 
   ChatPeer({
     required this.rawPublicKey,
     required this.nickname,
     this.isPending = false,
     this.isGroup = false,
-    this.groupMemberKeys = const [],
-  }) : shortId = rawPublicKey.substring(rawPublicKey.length - 15);
+    List<String>? groupMemberKeys,
+    List<String>? allowedJoinerKeys,
+    this.groupInviteSecret,
+    this.groupIntroducerKey,
+  }) : groupMemberKeys = groupMemberKeys ?? [],
+       allowedJoinerKeys = allowedJoinerKeys ?? [],
+       shortId = rawPublicKey.substring(rawPublicKey.length - 15);
 }

@@ -10,6 +10,10 @@ class CompactSidebar extends StatelessWidget {
   final VoidCallback onMenuPressed;
   final Function(ChatPeer) onSelectPeer;
 
+  /// Fired on long-pressing a peer avatar - lets the caller offer to copy
+  /// that contact's public key (e.g. to add them to a group's allow-list).
+  final Function(ChatPeer)? onPeerLongPress;
+
   const CompactSidebar({
     super.key,
     required this.peers,
@@ -17,6 +21,7 @@ class CompactSidebar extends StatelessWidget {
     required this.onlinePeers,
     required this.onMenuPressed,
     required this.onSelectPeer,
+    this.onPeerLongPress,
   });
 
   @override
@@ -104,6 +109,7 @@ class CompactSidebar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: GestureDetector(
         onTap: () => onSelectPeer(p),
+        onLongPress: onPeerLongPress != null ? () => onPeerLongPress!(p) : null,
         child: Stack(
           alignment: Alignment.center,
           children: [
@@ -121,19 +127,23 @@ class CompactSidebar extends StatelessWidget {
                 ),
               ),
             ),
-            Positioned(
-              right: 14,
-              bottom: 2,
-              child: Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(
-                  color: isOnline ? theme.colorScheme.primary : Color.fromARGB(255, 66, 66, 66),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: baseIndicatorColor, width: 2),
+            // Online/offline only means something for a single 1:1 contact
+            // - omitted entirely for group chat entries, same reasoning as
+            // the expanded sidebar.
+            if (!p.isGroup)
+              Positioned(
+                right: 14,
+                bottom: 2,
+                child: Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: isOnline ? theme.colorScheme.primary : Color.fromARGB(255, 66, 66, 66),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: baseIndicatorColor, width: 2),
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),

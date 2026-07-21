@@ -151,7 +151,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         rawPublicKey: data['id'] as String,
         nickname: data['name'] as String,
         isGroup: true,
-        groupMemberKeys: (data['members'] as List).cast<String>(),
+        isPending: data['isPending'] == true,
+        groupMemberKeys: ((data['members'] as List?) ?? const [])
+            .cast<String>(),
+        allowedJoinerKeys: ((data['allowedJoinerKeys'] as List?) ?? const [])
+            .cast<String>(),
+        groupInviteSecret: data['inviteSecret'] as String?,
+        groupIntroducerKey: data['introducerKey'] as String?,
       );
     }).toList();
 
@@ -212,6 +218,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         });
         _syncPeersToStorage();
       },
+      onGroupReadReceiptReceived: _handleGroupReadReceipt,
+      onGroupMessageDeleted: _handleGroupMessageDeleted,
+      onGroupJoinRequestReceived: _handleGroupJoinRequest,
+      onGroupJoinAccepted: _handleGroupJoinAccepted,
+      onGroupJoinRejected: _handleGroupJoinRejected,
+      onGroupMemberAdded: _handleGroupMemberAdded,
+      onGroupAllowListChangeRequestReceived: _handleGroupAllowListChangeRequest,
+      onGroupAllowListSyncReceived: _handleGroupAllowListSync,
+      onGroupKicked: _handleGroupKicked,
       onReadReceiptReceived: (senderPublicKey, targetMsgId) async {
         final cleanedSenderKey = senderPublicKey.trim();
         final peerIndex = _peers.indexWhere(
@@ -235,6 +250,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             msgId: targetMsgId,
             encryptedPayload: peer.messages[msgIndex].text,
             isMe: true,
+            isRead: true,
             timestampIso: peer.messages[msgIndex].timestamp.toIso8601String(),
           );
         }
@@ -345,23 +361,25 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
         if (group.messages.any((m) => m.id == incomingMsg.id)) return;
 
+        final bool isChatOpenAndVisible =
+            _selectedPeer == group && _isWindowInFocus && _autoScroll;
+
         await StorageService.persistEncryptedMessage(
           peerPublicKey: groupId,
           msgId: incomingMsg.id,
           encryptedPayload: text,
           isMe: false,
+          isRead: isChatOpenAndVisible,
           timestampIso: incomingMsg.timestamp.toIso8601String(),
           mediaType: mediaType,
           mediaFileName: mediaFileName,
           mediaId: mediaId,
           mediaKeyBase64: mediaKeyBase64,
           mediaIvBase64: mediaIvBase64,
+          senderKey: cleanedSenderKey,
         );
 
         if (!mounted) return;
-
-        final bool isChatOpenAndVisible =
-            _selectedPeer == group && _isWindowInFocus && _autoScroll;
 
         setState(() {
           incomingMsg.isRead = isChatOpenAndVisible;
@@ -373,6 +391,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
             title: group.nickname,
             body: text,
+          );
+        }
+
+        if (isChatOpenAndVisible) {
+          _sessionManager?.sendGroupReadReceipt(
+            cleanedSenderKey,
+            groupId,
+            incomingMsg.id,
           );
         }
 
@@ -393,9 +419,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
         final peer = _peers[peerIndex];
         final removedMsgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
-        if (removedMsgIndex != -1) {
-          _deleteCachedMediaFile(peer.messages[removedMsgIndex]);
-        }
+        if (removedMsgIndex == -1) return;
+
+        // Only the message's original author may delete it for everyone -
+        // otherwise this peer could delete a message *I* sent just by
+        // sending a delete notice for its id. `isMe` means I authored it,
+        // so a notice from the other side about it is never legitimate.
+        if (peer.messages[removedMsgIndex].isMe) return;
+
+        _deleteCachedMediaFile(peer.messages[removedMsgIndex]);
         if (mounted) {
           setState(() {
             peer.messages.removeWhere((m) => m.id == targetMsgId);
@@ -428,6 +460,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   Future<void> _pickAndSendMedia() async {
     if (_selectedPeer == null || _sessionManager == null) return;
+    if (_selectedPeer!.isGroup && _selectedPeer!.isPending) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Still waiting for approval to join this group.'),
+        ),
+      );
+      return;
+    }
 
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       withData: false, 
@@ -492,7 +532,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       String persistentLocalPath = filePath;
       try {
         final cacheDir = await StorageService.getMediaCacheDirectory();
-        final cachedFile = File('${cacheDir.path}/${msgId}_$fileName');
+        final safeFileName = StorageService.sanitizeFileName(fileName);
+        final cachedFile = File('${cacheDir.path}/${msgId}_$safeFileName');
         await cachedFile.writeAsBytes(fileBytes);
         persistentLocalPath = cachedFile.path;
       } catch (e) {
@@ -626,11 +667,15 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     final sender = _peers[peerIndex];
     if (sender.messages.any((m) => m.id == incomingMsg.id)) return;
 
+    final bool isChatOpenAndVisible =
+        _selectedPeer == sender && _isWindowInFocus && _autoScroll;
+
     await StorageService.persistEncryptedMessage(
       peerPublicKey: cleanedSenderKey,
       msgId: incomingMsg.id,
       encryptedPayload: incomingMsg.text,
       isMe: false,
+      isRead: isChatOpenAndVisible,
       timestampIso: incomingMsg.timestamp.toIso8601String(),
       mediaType: incomingMsg.mediaType,
       mediaFileName: incomingMsg.mediaFileName,
@@ -641,9 +686,6 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
 
     if (!mounted) return;
-
-    final bool isChatOpenAndVisible =
-        _selectedPeer == sender && _isWindowInFocus && _autoScroll;
 
     setState(() {
       incomingMsg.isRead = isChatOpenAndVisible;
@@ -688,9 +730,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       );
 
       final cacheDir = await StorageService.getMediaCacheDirectory();
-      final fileTarget = File(
-        '${cacheDir.path}/${msg.id}_${msg.mediaFileName ?? 'attachment'}',
-      );
+      // mediaFileName came from the network (a remote peer's choice of
+      // caption for their own file) - sanitize it before it ever touches a
+      // file path, or a malicious peer could send something like
+      // "../../../elsewhere" and write outside the cache directory.
+      final safeFileName = StorageService.sanitizeFileName(msg.mediaFileName);
+      final fileTarget = File('${cacheDir.path}/${msg.id}_$safeFileName');
       await fileTarget.writeAsBytes(bytes);
 
       if (mounted) {
@@ -818,18 +863,26 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) {
       return;
     }
-    // Read receipts aren't implemented for groups in this first pass -
-    // fanning "I read this" out to every member (and reconciling N
-    // separate per-member read states per message) is a real feature of
-    // its own, kept out of scope here so what does ship is correct.
-    if (_selectedPeer!.isGroup) return;
+    // A pending group is one we've requested to join but haven't been
+    // admitted to yet - there's no one to send a receipt to.
+    if (_selectedPeer!.isGroup && _selectedPeer!.isPending) return;
 
     bool stateChanged = false;
 
     for (var m in _selectedPeer!.messages) {
       // If it's an incoming message and hasn't been marked read locally yet
       if (!m.isMe && !m.isRead) {
-        _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
+        if (_selectedPeer!.isGroup) {
+          if (m.senderKey != null) {
+            _sessionManager!.sendGroupReadReceipt(
+              m.senderKey!,
+              _selectedPeer!.rawPublicKey,
+              m.id,
+            );
+          }
+        } else {
+          _sessionManager!.sendReadReceipt(_selectedPeer!.rawPublicKey, m.id);
+        }
         m.isRead = true;
         stateChanged = true;
 
@@ -839,6 +892,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           msgId: m.id,
           encryptedPayload: m.text,
           isMe: false,
+          isRead: true,
           timestampIso: m.timestamp.toIso8601String(),
         );
       }
@@ -884,6 +938,29 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
+  /// A random, per-group secret that becomes part of the invite code (see
+  /// [_buildInviteCode]). Unlike the group ID, this is never displayed or
+  /// used to look anything up on its own - it only ever proves "I have a
+  /// valid invite" to the group's introducer alongside the joiner's own
+  /// (allow-listed) key.
+  String _generateGroupSecret() {
+    final rand = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rand.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  String _buildInviteCode(ChatPeer group) {
+    return base64Encode(
+      utf8.encode(
+        jsonEncode({
+          'id': group.rawPublicKey,
+          'secret': group.groupInviteSecret,
+          'introducer': group.groupIntroducerKey,
+        }),
+      ),
+    );
+  }
+
   void _syncGroupsToStorage() async {
     final serialized = _groups
         .map(
@@ -891,6 +968,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             'id': g.rawPublicKey,
             'name': g.nickname,
             'members': g.groupMemberKeys,
+            'allowedJoinerKeys': g.allowedJoinerKeys,
+            'inviteSecret': g.groupInviteSecret,
+            'introducerKey': g.groupIntroducerKey,
+            'isPending': g.isPending,
           },
         )
         .toList();
@@ -898,55 +979,65 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   /// Creates a new group locally, then shows the invite code that needs
-  /// to be shared with [memberKeys] out-of-band so they can join via
-  /// [_handleJoinGroup]. Nobody is contacted automatically - creating a
-  /// group is a purely local action, same as generating your own
-  /// identity key pair.
+  /// to be shared with everyone out-of-band so they can request to join
+  /// via [_handleJoinGroup]. Nobody is contacted automatically - creating
+  /// a group is a purely local action, same as generating your own
+  /// identity key pair. Unlike the old scheme, [memberKeys] don't become
+  /// members directly - they're seeded onto the group's allow-list, and
+  /// still have to go through the same join-request handshake
+  /// ([_handleGroupJoinRequest]) as anyone added later via group settings.
+  /// You (the creator) are always the group's introducer - the one whose
+  /// device actually evaluates join requests.
   void _handleCreateGroup(String groupName, List<String> memberKeys) {
     final groupId = _generateGroupId();
-    final cleanedMembers = memberKeys
-        .map((k) => k.trim())
-        .where((k) => k.isNotEmpty && k != _myRawPublicKey)
-        .toSet()
-        .toList();
+    final secret = _generateGroupSecret();
+    final cleanedAllowed = {
+      _myRawPublicKey,
+      ...memberKeys.map((k) => k.trim()).where((k) => k.isNotEmpty),
+    }.toList();
 
+    late final ChatPeer newGroup;
     setState(() {
-      final newGroup = ChatPeer(
+      newGroup = ChatPeer(
         rawPublicKey: groupId,
         nickname: groupName,
         isGroup: true,
-        groupMemberKeys: cleanedMembers,
+        groupMemberKeys: [],
+        allowedJoinerKeys: cleanedAllowed,
+        groupInviteSecret: secret,
+        groupIntroducerKey: _myRawPublicKey,
       );
       _groups.add(newGroup);
       _selectedPeer = newGroup;
     });
     _syncGroupsToStorage();
 
-    final inviteCode = base64Encode(
-      utf8.encode(
-        jsonEncode({
-          'id': groupId,
-          'members': [...cleanedMembers, _myRawPublicKey],
-        }),
-      ),
+    Dialogs.showGroupInvite(
+      context: context,
+      inviteCode: _buildInviteCode(newGroup),
     );
-
-    Dialogs.showGroupInvite(context: context, inviteCode: inviteCode);
   }
 
-  /// Joins a group from an invite code produced by [_handleCreateGroup].
-  /// [groupName] is your own local name for it, same idea as nicknaming a
-  /// new contact.
+  /// Sends a join request for the group described by [inviteCode] - the
+  /// actual admission decision happens asynchronously on the introducer's
+  /// device (see [_handleGroupJoinRequest]), so the group is added locally
+  /// in a pending state until [_handleGroupJoinAccepted] or
+  /// [_handleGroupJoinRejected] resolves it. [groupName] is your own local
+  /// name for it, same idea as nicknaming a new contact.
   void _handleJoinGroup(String groupName, String inviteCode) {
     try {
       final decoded = jsonDecode(utf8.decode(base64Decode(inviteCode.trim())));
       if (decoded is! Map ||
           decoded['id'] is! String ||
-          decoded['members'] is! List) {
+          decoded['secret'] is! String ||
+          decoded['introducer'] is! String) {
         throw const FormatException('malformed invite code');
       }
 
       final groupId = decoded['id'] as String;
+      final secret = decoded['secret'] as String;
+      final introducerKey = (decoded['introducer'] as String).trim();
+
       if (_groups.any((g) => g.rawPublicKey == groupId)) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("You've already joined this group.")),
@@ -954,24 +1045,26 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         return;
       }
 
-      final otherMembers = (decoded['members'] as List)
-          .whereType<String>()
-          .map((k) => k.trim())
-          .where((k) => k != _myRawPublicKey)
-          .toSet()
-          .toList();
-
       setState(() {
         final newGroup = ChatPeer(
           rawPublicKey: groupId,
           nickname: groupName,
           isGroup: true,
-          groupMemberKeys: otherMembers,
+          isPending: true,
+          groupInviteSecret: secret,
+          groupIntroducerKey: introducerKey,
         );
         _groups.add(newGroup);
         _selectedPeer = newGroup;
       });
       _syncGroupsToStorage();
+      _sessionManager?.sendGroupJoinRequest(introducerKey, groupId, secret);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Join request sent - waiting for approval.'),
+        ),
+      );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Invalid invite code: $e')),
@@ -979,10 +1072,381 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
   }
 
+  /// Runs on the group's introducer device when someone requests to join.
+  /// Admits [requesterKey] only if both the invite secret matches AND
+  /// their key is on the group's allow-list - either check failing is
+  /// treated identically (silently not-allowed) to avoid leaking which one
+  /// failed. [requesterKey] is already cryptographically authenticated by
+  /// the time it reaches here (see [CryptoService.decryptEnvelope]), so
+  /// this is purely an authorization check, not an authentication one.
+  void _handleGroupJoinRequest(
+    String requesterKey,
+    String groupId,
+    String secret,
+  ) {
+    final cleanedRequester = requesterKey.trim();
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    // Only the designated introducer evaluates join requests - anyone else
+    // who happens to belong to the group ignores them.
+    if (group.groupIntroducerKey != _myRawPublicKey) return;
+
+    final bool secretMatches = group.groupInviteSecret == secret;
+    final bool isAllowed = group.allowedJoinerKeys.contains(cleanedRequester);
+
+    if (!secretMatches || !isAllowed) {
+      _sessionManager?.sendGroupJoinRejected(cleanedRequester, groupId);
+      return;
+    }
+
+    if (!group.groupMemberKeys.contains(cleanedRequester)) {
+      setState(() {
+        group.groupMemberKeys.add(cleanedRequester);
+      });
+      _syncGroupsToStorage();
+    }
+
+    final othersToNotify = group.groupMemberKeys
+        .where((k) => k != cleanedRequester)
+        .toList();
+
+    _sessionManager?.sendGroupJoinAccepted(
+      targetKey: cleanedRequester,
+      groupId: groupId,
+      memberKeys: [...othersToNotify, _myRawPublicKey],
+      groupName: group.nickname,
+      allowedJoinerKeys: group.allowedJoinerKeys,
+    );
+
+    // Tell every other existing member about the new joiner, so their
+    // local roster grows to match - otherwise the new member's messages
+    // would pass the introducer's own membership check but get silently
+    // dropped by everyone else (see `onGroupMessageReceived`'s guard).
+    if (othersToNotify.isNotEmpty) {
+      _sessionManager?.sendGroupMemberAdded(
+        othersToNotify,
+        groupId,
+        cleanedRequester,
+      );
+    }
+  }
+
+  void _handleGroupJoinAccepted(
+    String groupId,
+    List<String> memberKeys,
+    String groupName,
+    List<String> allowedJoinerKeys,
+  ) {
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    setState(() {
+      group.isPending = false;
+      for (final key in memberKeys) {
+        if (key != _myRawPublicKey && !group.groupMemberKeys.contains(key)) {
+          group.groupMemberKeys.add(key);
+        }
+      }
+      // The introducer is the sole source of truth for the allow-list -
+      // adopt its copy outright rather than merging, so we start in sync
+      // instead of with whatever (usually empty) local state we had while
+      // pending.
+      group.allowedJoinerKeys = List<String>.from(allowedJoinerKeys);
+    });
+    _syncGroupsToStorage();
+
+    // The introducer already tells every other member about us
+    // (`sendGroupMemberAdded`), but that's a single delivery per
+    // recipient - if it's ever dropped, or simply arrives after
+    // something we send, that member's `groupMemberKeys` would never
+    // include us and would silently reject our messages/attachments for
+    // good (see the membership check in `onGroupMessageReceived`).
+    // Announcing ourselves directly to everyone we were just told about
+    // closes that gap; every recipient already treats a repeat
+    // "member added" for a key it already knows as a no-op, so this is
+    // safe to send unconditionally.
+    if (group.groupMemberKeys.isNotEmpty) {
+      _sessionManager?.sendGroupMemberAdded(
+        group.groupMemberKeys,
+        groupId,
+        _myRawPublicKey,
+      );
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Joined "$groupName"!')),
+      );
+    }
+  }
+
+  void _handleGroupJoinRejected(String groupId) {
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    setState(() {
+      _groups.removeAt(groupIndex);
+      if (_selectedPeer == group) _selectedPeer = null;
+    });
+    _syncGroupsToStorage();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Join request denied: your key is not on the allow-list.'),
+        ),
+      );
+    }
+  }
+
+  void _handleGroupMemberAdded(String groupId, String newMemberKey) {
+    final cleanedKey = newMemberKey.trim();
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    if (group.isPending || cleanedKey == _myRawPublicKey) return;
+    if (group.groupMemberKeys.contains(cleanedKey)) return;
+
+    setState(() {
+      group.groupMemberKeys.add(cleanedKey);
+    });
+    _syncGroupsToStorage();
+  }
+
+  /// Runs on the introducer's device only - it alone owns the allow-list,
+  /// which is what keeps every member's displayed copy from drifting apart
+  /// (the previous peer-broadcast approach let members miss updates or
+  /// join with stale/empty state). [requesterKey] must currently be a
+  /// member (or the introducer itself); anyone else's request is ignored.
+  void _handleGroupAllowListChangeRequest(
+    String requesterKey,
+    String groupId,
+    List<String> addKeys,
+    List<String> removeKeys,
+  ) {
+    final cleanedRequester = requesterKey.trim();
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    if (group.groupIntroducerKey != _myRawPublicKey) return;
+    final bool requesterIsMember =
+        group.groupMemberKeys.contains(cleanedRequester) ||
+        cleanedRequester == _myRawPublicKey;
+    if (!requesterIsMember) return;
+
+    _applyAllowListChange(group, addKeys: addKeys, removeKeys: removeKeys);
+  }
+
+  /// Applies an allow-list add/remove on the introducer's authoritative
+  /// copy, kicks anyone removed while still a member, and re-syncs every
+  /// remaining member so nobody's local copy is left stale.
+  void _applyAllowListChange(
+    ChatPeer group, {
+    required List<String> addKeys,
+    required List<String> removeKeys,
+  }) {
+    final cleanedAdds = addKeys
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty && k != _myRawPublicKey);
+    final cleanedRemoves = removeKeys
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty)
+        .toSet();
+
+    final kickedKeys = cleanedRemoves
+        .where((k) => group.groupMemberKeys.contains(k))
+        .toList();
+
+    setState(() {
+      group.allowedJoinerKeys.addAll(
+        cleanedAdds.where((k) => !group.allowedJoinerKeys.contains(k)),
+      );
+      group.allowedJoinerKeys.removeWhere((k) => cleanedRemoves.contains(k));
+      group.groupMemberKeys.removeWhere((k) => kickedKeys.contains(k));
+    });
+    _syncGroupsToStorage();
+
+    for (final kicked in kickedKeys) {
+      _sessionManager?.sendGroupKicked(kicked, group.rawPublicKey);
+    }
+    if (group.groupMemberKeys.isNotEmpty) {
+      _sessionManager?.sendGroupAllowListSync(
+        group.groupMemberKeys,
+        group.rawPublicKey,
+        group.allowedJoinerKeys,
+        kickedKeys,
+      );
+    }
+  }
+
+  /// Runs on every non-introducer member's device: adopts the
+  /// introducer's authoritative allow-list outright (never merges) and
+  /// drops any member who was just kicked from the local roster.
+  void _handleGroupAllowListSync(
+    String groupId,
+    List<String> allowedJoinerKeys,
+    List<String> removedMemberKeys,
+  ) {
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    setState(() {
+      group.allowedJoinerKeys = List<String>.from(allowedJoinerKeys);
+      group.groupMemberKeys.removeWhere(
+        (k) => removedMemberKeys.contains(k),
+      );
+    });
+    _syncGroupsToStorage();
+  }
+
+  void _handleGroupKicked(String groupId) {
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    setState(() {
+      _groups.removeAt(groupIndex);
+      if (_selectedPeer == group) _selectedPeer = null;
+    });
+    _syncGroupsToStorage();
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('You were removed from "${group.nickname}".')),
+      );
+    }
+  }
+
+  /// Any current member (including the introducer) can propose extending
+  /// the allow-list from the group settings dialog. Non-introducers send
+  /// the proposal to the introducer to apply; the introducer applies it
+  /// directly, since it's already the authority.
+  void _handleAddAllowedKeys(ChatPeer group, List<String> newKeys) {
+    final cleaned = newKeys
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty && k != _myRawPublicKey)
+        .where((k) => !group.allowedJoinerKeys.contains(k))
+        .toList();
+    if (cleaned.isEmpty) return;
+
+    if (group.groupIntroducerKey == _myRawPublicKey) {
+      _applyAllowListChange(group, addKeys: cleaned, removeKeys: const []);
+    } else if (group.groupIntroducerKey != null) {
+      _sessionManager?.sendGroupAllowListChangeRequest(
+        introducerKey: group.groupIntroducerKey!,
+        groupId: group.rawPublicKey,
+        addKeys: cleaned,
+        removeKeys: const [],
+      );
+    }
+  }
+
+  /// Removes [keyToRemove] from the allow-list. If it belongs to a current
+  /// member, that member is kicked from the group as a consequence. Same
+  /// introducer-vs-proposal split as [_handleAddAllowedKeys].
+  void _handleRemoveAllowedKey(ChatPeer group, String keyToRemove) {
+    if (group.groupIntroducerKey == _myRawPublicKey) {
+      _applyAllowListChange(
+        group,
+        addKeys: const [],
+        removeKeys: [keyToRemove],
+      );
+    } else if (group.groupIntroducerKey != null) {
+      _sessionManager?.sendGroupAllowListChangeRequest(
+        introducerKey: group.groupIntroducerKey!,
+        groupId: group.rawPublicKey,
+        addKeys: const [],
+        removeKeys: [keyToRemove],
+      );
+    }
+  }
+
+  void _handleGroupReadReceipt(
+    String senderPublicKey,
+    String groupId,
+    String targetMsgId,
+  ) async {
+    final cleanedSenderKey = senderPublicKey.trim();
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    final msgIndex = group.messages.indexWhere((m) => m.id == targetMsgId);
+    if (msgIndex == -1) return;
+
+    final message = group.messages[msgIndex];
+    if (!message.isMe) return; // only my own messages track read-by state
+
+    if (mounted) {
+      setState(() {
+        message.readByKeys.add(cleanedSenderKey);
+      });
+    }
+
+    await StorageService.persistEncryptedMessage(
+      peerPublicKey: groupId,
+      msgId: targetMsgId,
+      encryptedPayload: message.text,
+      isMe: true,
+      timestampIso: message.timestamp.toIso8601String(),
+      readByKeys: message.readByKeys,
+    );
+  }
+
+  void _handleGroupMessageDeleted(
+    String senderPublicKey,
+    String groupId,
+    String targetMsgId,
+  ) {
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    final cleanedSenderKey = senderPublicKey.trim();
+    // Must be an actual current member, mirroring the membership check
+    // `onGroupMessageReceived` already applies.
+    if (!group.groupMemberKeys.contains(cleanedSenderKey)) return;
+
+    final removedMsgIndex = group.messages.indexWhere((m) => m.id == targetMsgId);
+    if (removedMsgIndex == -1) return;
+
+    final targetMsg = group.messages[removedMsgIndex];
+    // Being a member of the group isn't enough authorization on its own -
+    // only the message's original author may delete it for everyone.
+    // `isMe` means I authored it (so nobody else's delete notice for it is
+    // legitimate); otherwise the notice's sender must match who actually
+    // sent this particular message.
+    if (targetMsg.isMe || targetMsg.senderKey != cleanedSenderKey) return;
+
+    _deleteCachedMediaFile(targetMsg);
+    if (mounted) {
+      setState(() {
+        group.messages.removeWhere((m) => m.id == targetMsgId);
+      });
+    }
+    StorageService.deleteMessage(peerPublicKey: groupId, msgId: targetMsgId);
+  }
+
   void _sendMessage() async {
     if (_msgController.text.isEmpty ||
         _selectedPeer == null ||
         _sessionManager == null) {
+      return;
+    }
+
+    if (_selectedPeer!.isGroup && _selectedPeer!.isPending) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Still waiting for approval to join this group.'),
+        ),
+      );
       return;
     }
 
@@ -1096,6 +1560,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           mediaIvBase64: record['mediaIvBase64'] as String?,
           localPath: record['localPath'] as String?,
           reactions: _parseReactions(record['reactions']),
+          readByKeys: _parseStringSet(record['readByKeys']),
+          senderKey: record['senderKey'] as String?,
         )..isRead = record['isRead'] == true,
       );
     }
@@ -1113,12 +1579,30 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     });
 
     if (p.rawPublicKey == StorageService.savedMessagesPeerKey) return;
-    if (p.isGroup) return; // no read receipts for groups yet, see above
+    if (p.isGroup && p.isPending) return; // not admitted yet
 
     for (var m in p.messages) {
       if (!m.isMe && !m.isRead) {
-        _sessionManager?.sendReadReceipt(p.rawPublicKey, m.id);
+        if (p.isGroup) {
+          if (m.senderKey != null) {
+            _sessionManager?.sendGroupReadReceipt(
+              m.senderKey!,
+              p.rawPublicKey,
+              m.id,
+            );
+          }
+        } else {
+          _sessionManager?.sendReadReceipt(p.rawPublicKey, m.id);
+        }
         m.isRead = true;
+        StorageService.persistEncryptedMessage(
+          peerPublicKey: p.rawPublicKey.trim(),
+          msgId: m.id,
+          encryptedPayload: m.text,
+          isMe: false,
+          isRead: true,
+          timestampIso: m.timestamp.toIso8601String(),
+        );
       }
     }
   }
@@ -1157,6 +1641,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       }
     });
     return result;
+  }
+
+  /// Reconstructs the set of member public keys who've read a group
+  /// message, from whatever list-ish structure comes back out of Hive.
+  Set<String> _parseStringSet(dynamic raw) {
+    if (raw is! List) return {};
+    return raw.whereType<String>().toSet();
   }
 
   /// Toggles my own reaction with [emoji] on [message]: adds it if I
@@ -1244,6 +1735,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             ],
           ),
         ),
+        if (isGroupChat && message.isMe)
+          const PopupMenuItem(
+            value: 'readBy',
+            child: Row(
+              children: [
+                Icon(Icons.visibility_outlined, size: 16, color: Colors.white70),
+                SizedBox(width: 10),
+                Text('Read By'),
+              ],
+            ),
+          ),
         PopupMenuItem(
           value: 'save',
           child: Row(
@@ -1289,6 +1791,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             duration: Duration(seconds: 1),
           ),
         );
+      } else if (selectedValue == 'readBy') {
+        Dialogs.showReadByDialog(
+          context: context,
+          readerLabels: message.readByKeys.map(_displayNameFor).toList(),
+        );
       } else if (selectedValue == 'delete') {
         final bool isSavedMessagesChat =
             _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
@@ -1308,11 +1815,20 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             peerPublicKey: targetKey,
             msgId: message.id,
           );
-          // "Delete for everyone" isn't implemented for groups yet - same
-          // scope decision as reactions/receipts above - so this only
-          // removes it from your own device, like Saved Messages does.
-          if (!_selectedPeer!.isGroup) {
-            _sessionManager?.sendDeleteNotice(targetKey, message.id);
+          // Only the original author can delete a message for everyone
+          // else - deleting someone else's message here only removes it
+          // from my own local view, same as any other messenger's
+          // "delete for me".
+          if (message.isMe) {
+            if (_selectedPeer!.isGroup) {
+              _sessionManager?.sendGroupDeleteNotice(
+                _selectedPeer!.groupMemberKeys,
+                targetKey,
+                message.id,
+              );
+            } else {
+              _sessionManager?.sendDeleteNotice(targetKey, message.id);
+            }
           }
         }
 
@@ -1350,6 +1866,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       context: context,
       onCreateGroup: () => Dialogs.showCreateGroup(
         context: context,
+        contacts: _peers,
         onCreate: _handleCreateGroup,
       ),
       onJoinGroup: () => Dialogs.showJoinGroup(
@@ -1362,6 +1879,46 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         keyInputController: _keyInputController,
         onConnect: _handleConnectNewPeer,
       ),
+    );
+  }
+
+  /// Opens the group settings dialog: shows the (always-valid, member-
+  /// independent) invite code and lets any current member extend or shrink
+  /// the allow-list. Removing a key that belongs to a current member kicks
+  /// them from the group.
+  void _showGroupSettings(ChatPeer group) {
+    // Older groups (created before the creator's own key was seeded onto
+    // the allow-list) may not have it yet - add it defensively so the
+    // owner always shows up (as "You") and can be removed like anyone
+    // else, regardless of when the group was created.
+    final displayedAllowedKeys = [
+      if (group.groupIntroducerKey != null &&
+          !group.allowedJoinerKeys.contains(group.groupIntroducerKey))
+        group.groupIntroducerKey!,
+      ...group.allowedJoinerKeys,
+    ];
+    Dialogs.showGroupSettings(
+      context: context,
+      groupName: group.nickname,
+      inviteCode: _buildInviteCode(group),
+      allowedJoinerKeys: displayedAllowedKeys,
+      labelForKey: _displayNameFor,
+      onAddAllowedKeys: (keys) => _handleAddAllowedKeys(group, keys),
+      onRemoveAllowedKey: (key) => _handleRemoveAllowedKey(group, key),
+    );
+  }
+
+  /// Shown on long-pressing a contact in either sidebar - lets you copy
+  /// their public key so you can paste it into another group's allow-list
+  /// or the "Add Contact" dialog.
+  void _showPeerKeyMenu(ChatPeer p) {
+    if (p.isGroup || p.rawPublicKey == StorageService.savedMessagesPeerKey) {
+      return;
+    }
+    Dialogs.showPeerKeyDialog(
+      context: context,
+      nickname: p.nickname,
+      rawPublicKey: p.rawPublicKey,
     );
   }
 
@@ -1420,23 +1977,31 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             SizedBox(
               height: 73,
               child: Center(
-                child: ListTile(
-                  title: Text(
-                    _selectedPeer!.nickname,
-                    style: TextStyle(
-                      color: theme.colorScheme.primary,
-                      fontWeight: FontWeight.bold,
+                child: GestureDetector(
+                  onLongPress:
+                      (_selectedPeer!.isGroup && !_selectedPeer!.isPending)
+                      ? () => _showGroupSettings(_selectedPeer!)
+                      : null,
+                  child: ListTile(
+                    title: Text(
+                      _selectedPeer!.nickname,
+                      style: TextStyle(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                  subtitle: Text(
-                    isSavedMessagesChat
-                        ? 'Save messages here via the right-click / hold menu.'
-                        : _selectedPeer!.isGroup
-                        ? '${_selectedPeer!.groupMemberKeys.length + 1} members'
-                        : 'Target: ${_selectedPeer!.shortId}',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontFamily: 'monospace',
+                    subtitle: Text(
+                      isSavedMessagesChat
+                          ? 'Save messages here via the right-click / hold menu.'
+                          : _selectedPeer!.isGroup
+                          ? (_selectedPeer!.isPending
+                                ? 'Awaiting approval to join...'
+                                : '${_selectedPeer!.groupMemberKeys.length + 1} members - hold name for settings')
+                          : 'Target: ${_selectedPeer!.shortId}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
                     ),
                   ),
                 ),
@@ -1482,10 +2047,23 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
+  /// Whether a message I sent counts as "read": for a 1:1 chat that's just
+  /// [ChatMessage.isRead]; for a group it's "at least one other member has
+  /// sent back a receipt" - requiring *every* member breaks the moment
+  /// membership changes (a message sent before someone joined can never be
+  /// seen by them, so it could never be marked read again), and matches
+  /// the simple single-tick-vs-double-tick feel of the 1:1 indicator.
+  /// [_buildReadByMenuEntry] is where you see exactly *who's* read it.
+  bool _isMessageRead(ChatMessage m, bool isGroupChat) {
+    if (!isGroupChat) return m.isRead;
+    return m.readByKeys.isNotEmpty;
+  }
+
   /// Resolves a group message sender's raw public key to something
   /// readable: their nickname if they're already one of your contacts,
   /// otherwise their short ID (same fallback [ChatPeer.shortId] uses).
   String _displayNameFor(String rawPublicKey) {
+    if (rawPublicKey == _myRawPublicKey) return 'You';
     final known = _peers.where((p) => p.rawPublicKey.trim() == rawPublicKey);
     if (known.isNotEmpty) return known.first.nickname;
     return rawPublicKey.length > 15
@@ -1619,13 +2197,15 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                     timeString,
                     style: const TextStyle(color: Colors.white30, fontSize: 11),
                   ),
-                  if (!isSavedMessagesChat && !isGroupChat && m.isMe)
+                  if (!isSavedMessagesChat && m.isMe)
                     Padding(
                       padding: const EdgeInsets.only(left: 6.0),
                       child: Icon(
-                        m.isRead ? Icons.circle : Icons.radio_button_unchecked,
+                        _isMessageRead(m, isGroupChat)
+                            ? Icons.circle
+                            : Icons.radio_button_unchecked,
                         size: 7,
-                        color: m.isRead
+                        color: _isMessageRead(m, isGroupChat)
                             ? theme.colorScheme.primary
                             : Colors.white24,
                       ),
@@ -1997,6 +2577,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                 selectedPeer: _selectedPeer,
                 onlinePeers: _onlinePeers,
                 onSelectPeer: _selectAndLoadPeer,
+                onPeerLongPress: _showPeerKeyMenu,
                 onSettingsPressed: _showSettingsDialog,
                 onAboutPressed: () => Dialogs.showAboutDialog(context: context),
                 onIdentityPressed: () => Dialogs.showIdentityModal(
@@ -2057,6 +2638,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                           selectedPeer: _selectedPeer,
                           onlinePeers: _onlinePeers,
                           onSelectPeer: _selectAndLoadPeer,
+                          onPeerLongPress: _showPeerKeyMenu,
                           onSettingsPressed: _showSettingsDialog,
                           onAboutPressed: () =>
                               Dialogs.showAboutDialog(context: context),
@@ -2075,6 +2657,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                       selectedPeer: _selectedPeer,
                       onlinePeers: _onlinePeers,
                       onSelectPeer: _selectAndLoadPeer,
+                      onPeerLongPress: _showPeerKeyMenu,
                       onMenuPressed: () =>
                           setState(() => _isMobileSidebarExpanded = true),
                     ),

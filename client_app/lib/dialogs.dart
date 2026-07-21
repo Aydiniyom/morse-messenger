@@ -1,4 +1,5 @@
 import 'package:client_app/main.dart';
+import 'package:client_app/models.dart';
 import 'package:client_app/rounded_divider.dart';
 import 'package:client_app/storage_service.dart';
 import 'package:flutter/material.dart';
@@ -74,6 +75,7 @@ class Dialogs {
               width: double.infinity,
               child: OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
+                  overlayColor: Colors.transparent,
                   foregroundColor: Colors.redAccent,
                   side: const BorderSide(color: Colors.redAccent, width: 0.5),
                   padding: const EdgeInsets.symmetric(vertical: 12),
@@ -97,11 +99,13 @@ class Dialogs {
                       ),
                       actions: [
                         TextButton(
+                          style: TextButton.styleFrom(overlayColor: Colors.transparent),
                           onPressed: () => Navigator.pop(confirmCtx),
                           child: const Text('Cancel'),
                         ),
                         ElevatedButton(
                           style: ElevatedButton.styleFrom(
+                            overlayColor: Colors.transparent,
                             backgroundColor: Colors.redAccent,
                           ),
                           onPressed: () {
@@ -123,10 +127,12 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
+            style: ElevatedButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () {
               if (ipController.text.isNotEmpty) {
                 Navigator.pop(ctx);
@@ -165,6 +171,7 @@ class Dialogs {
                   height: 30,
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
+                      overlayColor: Colors.transparent,
                       foregroundColor: theme.colorScheme.primary,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -198,6 +205,7 @@ class Dialogs {
                   height: 30,
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
+                      overlayColor: Colors.transparent,
                       foregroundColor: theme.colorScheme.primary,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -226,6 +234,7 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Okay'),
           ),
@@ -273,6 +282,7 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text(
               'Decline',
@@ -281,6 +291,7 @@ class Dialogs {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
+              overlayColor: Colors.transparent,
               backgroundColor: theme.colorScheme.primary,
             ),
             onPressed: () {
@@ -348,11 +359,13 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Close'),
           ),
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
+              overlayColor: Colors.transparent,
               backgroundColor: theme.colorScheme.primary,
             ),
             icon: const Icon(Icons.copy, size: 16, color: Colors.black),
@@ -424,6 +437,7 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Cancel'),
           ),
@@ -469,6 +483,7 @@ class Dialogs {
                   height: 48,
                   child: IconButton.outlined(
                     style: OutlinedButton.styleFrom(
+                      overlayColor: Colors.transparent,
                       foregroundColor: theme.colorScheme.primary,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -494,11 +509,13 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
+              overlayColor: Colors.transparent,
               backgroundColor: theme.colorScheme.primary,
             ),
             onPressed: () {
@@ -565,6 +582,7 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Cancel'),
           ),
@@ -574,67 +592,119 @@ class Dialogs {
   }
 
   /// Creates a brand-new group. You name it locally - exactly like naming
-  /// a contact in [showAddPeer] - and list the other members' identity
-  /// keys, one per line. The relay is never told the group exists; after
-  /// creation, [showGroupInvite] shows a code to share with those members
-  /// out-of-band so they can join via [showJoinGroup].
+  /// a contact in [showAddPeer] - and pick which of your existing contacts
+  /// to seed the allow-list with (you can always add more, or add people
+  /// who aren't contacts yet, later from group settings). The relay is
+  /// never told the group exists; after creation, [showGroupInvite] shows
+  /// a code to share with those members out-of-band so they can join via
+  /// [showJoinGroup].
   static void showCreateGroup({
     required BuildContext context,
+    required List<ChatPeer> contacts,
     required Function(String groupName, List<String> memberKeys) onCreate,
   }) {
     final ThemeData theme = Theme.of(context);
     final nameController = TextEditingController();
-    final membersController = TextEditingController();
+    final Set<String> selectedKeys = {};
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1E1E),
-        title: const Text('Create Group'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(hintText: "Group name..."),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: membersController,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                hintText: "Members' identity keys, one per line...",
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setInnerState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1E1E1E),
+            title: const Text('Create Group'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(hintText: "Group name..."),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Add contacts (optional - you can add more later '
+                    'from group settings):',
+                    style: TextStyle(color: Colors.white60, fontSize: 12),
+                  ),
+                  const SizedBox(height: 4),
+                  if (contacts.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8.0),
+                      child: Text(
+                        'No contacts yet - add some first, or create the '
+                        'group empty and add people later.',
+                        style: TextStyle(color: Colors.white30, fontSize: 12),
+                      ),
+                    )
+                  else
+                    Container(
+                      constraints: const BoxConstraints(maxHeight: 220),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: contacts.length,
+                        itemBuilder: (ctx, i) {
+                          final contact = contacts[i];
+                          final isSelected = selectedKeys.contains(
+                            contact.rawPublicKey,
+                          );
+                          return CheckboxListTile(
+                            dense: true,
+                            value: isSelected,
+                            activeColor: theme.colorScheme.primary,
+                            title: Text(
+                              contact.nickname,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                            onChanged: (checked) {
+                              setInnerState(() {
+                                if (checked == true) {
+                                  selectedKeys.add(contact.rawPublicKey);
+                                } else {
+                                  selectedKeys.remove(contact.rawPublicKey);
+                                }
+                              });
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                ],
               ),
             ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: theme.colorScheme.primary,
-            ),
-            onPressed: () {
-              final memberKeys = membersController.text
-                  .split('\n')
-                  .map((k) => k.trim())
-                  .where((k) => k.isNotEmpty)
-                  .toList();
-              if (nameController.text.isNotEmpty && memberKeys.isNotEmpty) {
-                // Dismiss this dialog *before* onCreate runs - it opens the
-                // invite-code dialog right away, and popping afterwards
-                // would close that new dialog instead of this one (since
-                // Navigator.pop just closes whatever's on top).
-                Navigator.pop(ctx);
-                onCreate(nameController.text.trim(), memberKeys);
-              }
-            },
-            child: const Text('Create', style: TextStyle(color: Colors.black)),
-          ),
-        ],
+            actions: [
+              TextButton(
+                style: TextButton.styleFrom(overlayColor: Colors.transparent),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  overlayColor: Colors.transparent,
+                  backgroundColor: theme.colorScheme.primary,
+                ),
+                onPressed: () {
+                  if (nameController.text.trim().isEmpty) return;
+                  // Dismiss this dialog *before* onCreate runs - it opens
+                  // the invite-code dialog right away, and popping
+                  // afterwards would close that new dialog instead of this
+                  // one (since Navigator.pop just closes whatever's on
+                  // top).
+                  Navigator.pop(ctx);
+                  onCreate(nameController.text.trim(), selectedKeys.toList());
+                },
+                child: const Text('Create', style: TextStyle(color: Colors.black)),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -684,11 +754,13 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Close'),
           ),
           ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
+              overlayColor: Colors.transparent,
               backgroundColor: theme.colorScheme.primary,
             ),
             icon: const Icon(Icons.copy, size: 16, color: Colors.black),
@@ -705,6 +777,319 @@ class Dialogs {
                 ),
               );
             },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Shown on long-pressing a contact - lets you copy their public key so
+  /// you can paste it elsewhere (e.g. into a group's allow-list).
+  static void showPeerKeyDialog({
+    required BuildContext context,
+    required String nickname,
+    required String rawPublicKey,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: Text(nickname, style: const TextStyle(fontSize: 16)),
+        content: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.black26,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          constraints: const BoxConstraints(maxHeight: 180),
+          child: SingleChildScrollView(
+            child: Text(
+              rawPublicKey,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 10,
+                color: Colors.white30,
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              overlayColor: Colors.transparent,
+              backgroundColor: theme.colorScheme.primary,
+            ),
+            icon: const Icon(Icons.copy, size: 16, color: Colors.black),
+            label: const Text(
+              'Copy Public Key',
+              style: TextStyle(color: Colors.black),
+            ),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: rawPublicKey));
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Copied $nickname\'s public key!')),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Opened by long-pressing a group's name in the chat header. Shows the
+  /// group's invite code - always the same value, always copyable, and no
+  /// longer tied to who's currently a member - and lets any current member
+  /// extend or shrink the allow-list. The introducer is the sole source of
+  /// truth for this list (see chat_screen.dart's allow-list handlers), so
+  /// the count shown here is always what the introducer has, not a local
+  /// guess that can drift between devices. Removing a key that belongs to
+  /// a current member kicks them from the group.
+  static void showGroupSettings({
+    required BuildContext context,
+    required String groupName,
+    required String inviteCode,
+    required List<String> allowedJoinerKeys,
+    required String Function(String rawKey) labelForKey,
+    required Function(List<String> newKeys) onAddAllowedKeys,
+    required Function(String key) onRemoveAllowedKey,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    final newKeysController = TextEditingController();
+    final localKeys = List<String>.from(allowedJoinerKeys);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setInnerState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1E1E1E),
+            title: Text('$groupName Settings'),
+            // AlertDialog sizes its content intrinsically unless told
+            // otherwise, and the allow-list ListView.builder below can't
+            // report an intrinsic width (Viewport doesn't support that) -
+            // without this explicit width, that measurement throws and
+            // the dialog never actually renders (you just see the
+            // darkened barrier). Same fix already used in
+            // showReadByDialog below.
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Invite code - anyone can use this to request to '
+                      'join, but they still need their key added below '
+                      'before they\'ll be let in.',
+                      style: TextStyle(color: Colors.white60, fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      constraints: const BoxConstraints(maxHeight: 120),
+                      child: SingleChildScrollView(
+                        child: Text(
+                          inviteCode,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 10,
+                            color: Colors.white30,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          overlayColor: Colors.transparent,
+                          foregroundColor: theme.colorScheme.primary,
+                          side: const BorderSide(color: Colors.white10),
+                        ),
+                        icon: const Icon(Icons.copy, size: 14),
+                        label: const Text('Copy Invite Code'),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: inviteCode));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Invite code copied to clipboard!'),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const RoundedDivider(),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Allowed to join (${localKeys.length})',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    if (localKeys.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8.0),
+                        child: Text(
+                          'Nobody yet - add a key below.',
+                          style: TextStyle(color: Colors.white30, fontSize: 12),
+                        ),
+                      )
+                    else
+                      Container(
+                        constraints: const BoxConstraints(maxHeight: 160),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: localKeys.length,
+                          itemBuilder: (ctx, i) {
+                            final key = localKeys[i];
+                            return ListTile(
+                              dense: true,
+                              title: Text(
+                                labelForKey(key),
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                              trailing: IconButton(
+                                style: IconButton.styleFrom(overlayColor: Colors.transparent),
+                                icon: const Icon(
+                                  Icons.remove_circle_outline,
+                                  size: 18,
+                                  color: Colors.redAccent,
+                                ),
+                                tooltip: 'Remove (kicks them if they joined)',
+                                onPressed: () {
+                                  onRemoveAllowedKey(key);
+                                  setInnerState(() {
+                                    localKeys.removeAt(i);
+                                  });
+                                },
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: newKeysController,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        hintText: "New members' identity keys, one per line...",
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          overlayColor: Colors.transparent,
+                          backgroundColor: theme.colorScheme.primary,
+                        ),
+                        onPressed: () {
+                          final newKeys = newKeysController.text
+                              .split('\n')
+                              .map((k) => k.trim())
+                              .where((k) => k.isNotEmpty)
+                              .toList();
+                          if (newKeys.isEmpty) return;
+                          onAddAllowedKeys(newKeys);
+                          newKeysController.clear();
+                          setInnerState(() {
+                            localKeys.addAll(
+                              newKeys.where((k) => !localKeys.contains(k)),
+                            );
+                          });
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Allow-list updated.'),
+                            ),
+                          );
+                        },
+                        child: const Text(
+                          'Add to Allow-List',
+                          style: TextStyle(color: Colors.black),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                style: TextButton.styleFrom(overlayColor: Colors.transparent),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Done'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// Lists who's read a group message you sent, opened from the message's
+  /// "Read By" context menu entry.
+  static void showReadByDialog({
+    required BuildContext context,
+    required List<String> readerLabels,
+  }) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Read By'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: readerLabels.isEmpty
+              ? const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8.0),
+                  child: Text(
+                    'No one has read this message yet.',
+                    style: TextStyle(color: Colors.white60),
+                  ),
+                )
+              : ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 240),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: readerLabels.length,
+                    itemBuilder: (ctx, i) => ListTile(
+                      dense: true,
+                      leading: const Icon(
+                        Icons.check_circle,
+                        size: 16,
+                        color: Colors.white70,
+                      ),
+                      title: Text(readerLabels[i]),
+                    ),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
           ),
         ],
       ),
@@ -744,11 +1129,13 @@ class Dialogs {
         ),
         actions: [
           TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
             onPressed: () => Navigator.pop(ctx),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
+              overlayColor: Colors.transparent,
               backgroundColor: theme.colorScheme.primary,
             ),
             onPressed: () {
