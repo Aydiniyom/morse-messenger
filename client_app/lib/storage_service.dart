@@ -220,6 +220,11 @@ class StorageService {
     Map<String, Set<String>>? reactions,
     Set<String>? readByKeys,
     String? senderKey,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderKey,
+    bool? replyToIsMedia,
+    String? replyToMediaType,
   }) async {
     try {
       final box = await _getHistoryBox();
@@ -258,6 +263,11 @@ class StorageService {
             ? readByKeys.toList()
             : existing['readByKeys'],
         'senderKey': senderKey ?? existing['senderKey'],
+        'replyToId': replyToId ?? existing['replyToId'],
+        'replyToText': replyToText ?? existing['replyToText'],
+        'replyToSenderKey': replyToSenderKey ?? existing['replyToSenderKey'],
+        'replyToIsMedia': replyToIsMedia ?? existing['replyToIsMedia'] ?? false,
+        'replyToMediaType': replyToMediaType ?? existing['replyToMediaType'],
       };
 
       if (existingIndex != -1) {
@@ -379,6 +389,11 @@ class StorageService {
     String? mediaType,
     String? mediaFileName,
     String? localPath,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderKey,
+    bool replyToIsMedia = false,
+    String? replyToMediaType,
   }) async {
     try {
       final box = _getSettingsBox();
@@ -392,6 +407,11 @@ class StorageService {
         'mediaType': mediaType,
         'mediaFileName': mediaFileName,
         'localPath': localPath,
+        'replyToId': replyToId,
+        'replyToText': replyToText,
+        'replyToSenderKey': replyToSenderKey,
+        'replyToIsMedia': replyToIsMedia,
+        'replyToMediaType': replyToMediaType,
       });
 
       await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));

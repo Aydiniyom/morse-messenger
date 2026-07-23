@@ -22,6 +22,7 @@ import 'expanded_sidebar.dart';
 import 'compact_sidebar.dart';
 import 'chat_session_manager.dart';
 import 'video_player_widget.dart';
+import 'swipe_to_reply.dart';
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -83,6 +84,22 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   Set<String> _onlinePeers = {};
 
+  /// The message currently staged as a reply target, shown as a small
+  /// preview above the input field. Cleared once the reply is sent or the
+  /// user cancels it.
+  ChatMessage? _replyingTo;
+
+  /// GlobalKeys for every currently-rendered message bubble, created
+  /// lazily as each bubble builds. Lets tapping a quoted-reply block
+  /// scroll the original message into view via [Scrollable.ensureVisible]
+  /// without needing a lazy ListView.builder + index math.
+  final Map<String, GlobalKey> _messageBubbleKeys = {};
+
+  /// The id of the message currently flashing a highlight after being
+  /// jumped to from a reply quote, or null if nothing's highlighted.
+  String? _highlightedMessageId;
+  Timer? _highlightClearTimer;
+
   @override
   void initState() {
     super.initState();
@@ -104,6 +121,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _backgroundDisconnectTimer?.cancel();
+    _highlightClearTimer?.cancel();
     _sessionManager?.disconnect();
     _msgFocusNode.dispose();
     _scrollController.dispose();
@@ -257,6 +275,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         _syncPeersToStorage();
       },
       onGroupReadReceiptReceived: _handleGroupReadReceipt,
+      onGroupReactionReceived: _handleGroupReaction,
       onGroupMessageDeleted: _handleGroupMessageDeleted,
       onGroupJoinRequestReceived: _handleGroupJoinRequest,
       onGroupJoinAccepted: _handleGroupJoinAccepted,
@@ -305,6 +324,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               mediaKeyBase64 != null &&
               mediaIvBase64 != null;
 
+          final String? replyToId = payload['replyToId'];
+          final String? replyToText = payload['replyToText'];
+          final String? replyToSenderKey = payload['replyToSenderKey'];
+          final bool replyToIsMedia = payload['replyToIsMedia'] == true;
+          final String? replyToMediaType = payload['replyToMediaType'];
+
           final incomingMsg = ChatMessage(
             text,
             false,
@@ -316,6 +341,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             mediaKeyBase64: mediaKeyBase64,
             mediaIvBase64: mediaIvBase64,
             isTransferring: hasMedia,
+            replyToId: replyToId,
+            replyToText: replyToText,
+            replyToSenderKey: replyToSenderKey,
+            replyToIsMedia: replyToIsMedia,
+            replyToMediaType: replyToMediaType,
           );
 
           await _handleInboundMessageAppend(senderKey, incomingMsg);
@@ -383,6 +413,12 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             mediaKeyBase64 != null &&
             mediaIvBase64 != null;
 
+        final String? replyToId = payload['replyToId'];
+        final String? replyToText = payload['replyToText'];
+        final String? replyToSenderKey = payload['replyToSenderKey'];
+        final bool replyToIsMedia = payload['replyToIsMedia'] == true;
+        final String? replyToMediaType = payload['replyToMediaType'];
+
         final incomingMsg = ChatMessage(
           text,
           false,
@@ -395,6 +431,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           mediaKeyBase64: mediaKeyBase64,
           mediaIvBase64: mediaIvBase64,
           isTransferring: hasMedia,
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
 
         if (group.messages.any((m) => m.id == incomingMsg.id)) return;
@@ -415,6 +456,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           mediaKeyBase64: mediaKeyBase64,
           mediaIvBase64: mediaIvBase64,
           senderKey: cleanedSenderKey,
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
 
         if (!mounted) return;
@@ -546,6 +592,19 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     // the attachment, instead of a hardcoded placeholder string.
     final String caption = _msgController.text.trim();
 
+    // Same snapshot-before-clearing approach as `_sendMessage` - captured
+    // here (rather than after the tempMessage/setState below) so it can't
+    // observe a reply the user cancelled mid-pick.
+    final ChatMessage? replyingToSnapshot = _replyingTo;
+    final String? replyToId = replyingToSnapshot?.id;
+    final String? replyToText =
+        replyingToSnapshot != null ? _replyPreviewText(replyingToSnapshot) : null;
+    final String? replyToSenderKey = replyingToSnapshot != null
+        ? _originalSenderKeyFor(replyingToSnapshot)
+        : null;
+    final bool replyToIsMedia = replyingToSnapshot?.isMedia ?? false;
+    final String? replyToMediaType = replyingToSnapshot?.mediaType;
+
     final tempMessage = ChatMessage(
       caption,
       true,
@@ -556,10 +615,16 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       localPath: filePath,
       isTransferring: true,
       uploadProgress: 0.05,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderKey: replyToSenderKey,
+      replyToIsMedia: replyToIsMedia,
+      replyToMediaType: replyToMediaType,
     );
 
     setState(() {
       targetPeer.messages.add(tempMessage);
+      _replyingTo = null;
     });
     _msgController.clear();
     _scrollToBottom();
@@ -661,6 +726,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           fileName: fileName,
           rawBytes: fileBytes,
           onProgress: onUploadProgress,
+          replyToId: tempMessage.replyToId,
+          replyToText: tempMessage.replyToText,
+          replyToSenderKey: tempMessage.replyToSenderKey,
+          replyToIsMedia: tempMessage.replyToIsMedia,
+          replyToMediaType: tempMessage.replyToMediaType,
         );
         // Every member failing means nothing actually went out - treat it
         // as a full failure so it's retryable, rather than "delivered".
@@ -678,6 +748,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           fileName: fileName,
           rawBytes: fileBytes,
           onProgress: onUploadProgress,
+          replyToId: tempMessage.replyToId,
+          replyToText: tempMessage.replyToText,
+          replyToSenderKey: tempMessage.replyToSenderKey,
+          replyToIsMedia: tempMessage.replyToIsMedia,
+          replyToMediaType: tempMessage.replyToMediaType,
         );
       }
 
@@ -690,6 +765,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         mediaType: mediaType,
         mediaFileName: fileName,
         localPath: persistentLocalPath,
+        replyToId: tempMessage.replyToId,
+        replyToText: tempMessage.replyToText,
+        replyToSenderKey: tempMessage.replyToSenderKey,
+        replyToIsMedia: tempMessage.replyToIsMedia,
+        replyToMediaType: tempMessage.replyToMediaType,
       );
 
       if (!mounted) return;
@@ -858,6 +938,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       mediaKeyBase64: incomingMsg.mediaKeyBase64,
       mediaIvBase64: incomingMsg.mediaIvBase64,
       localPath: incomingMsg.localPath,
+      replyToId: incomingMsg.replyToId,
+      replyToText: incomingMsg.replyToText,
+      replyToSenderKey: incomingMsg.replyToSenderKey,
+      replyToIsMedia: incomingMsg.replyToIsMedia,
+      replyToMediaType: incomingMsg.replyToMediaType,
     );
 
     if (!mounted) return;
@@ -1575,6 +1660,50 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
+  /// Applies an incoming group reaction update: mirrors [onReactionReceived]
+  /// (the 1:1 case), just scoped to a group. Anyone can react to any
+  /// message in the group - unlike delete, there's no "only the author"
+  /// restriction here, since reacting doesn't change the message itself.
+  void _handleGroupReaction(
+    String senderPublicKey,
+    String groupId,
+    String targetMsgId,
+    String emoji,
+    bool isAdd,
+  ) async {
+    final cleanedSenderKey = senderPublicKey.trim();
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    if (!group.groupMemberKeys.contains(cleanedSenderKey)) return;
+
+    final msgIndex = group.messages.indexWhere((m) => m.id == targetMsgId);
+    if (msgIndex == -1) return;
+
+    final message = group.messages[msgIndex];
+
+    if (mounted) {
+      setState(() {
+        _applyReactionChange(
+          message: message,
+          emoji: emoji,
+          reactorKey: cleanedSenderKey,
+          isAdd: isAdd,
+        );
+      });
+    }
+
+    await StorageService.persistEncryptedMessage(
+      peerPublicKey: groupId,
+      msgId: targetMsgId,
+      encryptedPayload: message.text,
+      isMe: message.isMe,
+      timestampIso: message.timestamp.toIso8601String(),
+      reactions: message.reactions,
+    );
+  }
+
   void _handleGroupMessageDeleted(
     String senderPublicKey,
     String groupId,
@@ -1626,7 +1755,29 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
 
     final text = _msgController.text;
-    final newMsg = ChatMessage(text, true);
+    // Snapshot whatever's staged as a reply target *before* any awaits -
+    // `_replyingTo` is only cleared once the send actually succeeds (see
+    // below), so a failed send followed by the "Retry" action still has
+    // the same reply context to attach.
+    final ChatMessage? replyingToSnapshot = _replyingTo;
+    final String? replyToId = replyingToSnapshot?.id;
+    final String? replyToText =
+        replyingToSnapshot != null ? _replyPreviewText(replyingToSnapshot) : null;
+    final String? replyToSenderKey = replyingToSnapshot != null
+        ? _originalSenderKeyFor(replyingToSnapshot)
+        : null;
+    final bool replyToIsMedia = replyingToSnapshot?.isMedia ?? false;
+    final String? replyToMediaType = replyingToSnapshot?.mediaType;
+
+    final newMsg = ChatMessage(
+      text,
+      true,
+      replyToId: replyToId,
+      replyToText: replyToText,
+      replyToSenderKey: replyToSenderKey,
+      replyToIsMedia: replyToIsMedia,
+      replyToMediaType: replyToMediaType,
+    );
     final bool isSavedMessagesChat =
         _selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey;
 
@@ -1640,6 +1791,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           msgId: newMsg.id,
           encryptedPayload: text,
           timestampIso: newMsg.timestamp.toIso8601String(),
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
       } else if (_selectedPeer!.isGroup) {
         // The app may still be mid-reconnect (e.g. right after resuming
@@ -1656,6 +1812,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           text: text,
           msgId: newMsg.id,
           timestamp: newMsg.timestamp,
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
         if (_selectedPeer!.groupMemberKeys.isNotEmpty &&
             failedMembers.length == _selectedPeer!.groupMemberKeys.length) {
@@ -1668,6 +1829,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           encryptedPayload: text,
           isMe: true,
           timestampIso: newMsg.timestamp.toIso8601String(),
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
       } else {
         final bool connected = (_sessionManager?.isServerConnected ?? false) ||
@@ -1681,6 +1847,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           text: text,
           msgId: newMsg.id,
           timestamp: newMsg.timestamp,
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
 
         await StorageService.persistEncryptedMessage(
@@ -1689,12 +1860,18 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           encryptedPayload: text,
           isMe: true,
           timestampIso: newMsg.timestamp.toIso8601String(),
+          replyToId: replyToId,
+          replyToText: replyToText,
+          replyToSenderKey: replyToSenderKey,
+          replyToIsMedia: replyToIsMedia,
+          replyToMediaType: replyToMediaType,
         );
       }
 
       if (!mounted) return;
       setState(() {
         _selectedPeer!.messages.add(newMsg);
+        _replyingTo = null;
       });
 
       _msgController.clear();
@@ -1778,6 +1955,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           reactions: _parseReactions(record['reactions']),
           readByKeys: _parseStringSet(record['readByKeys']),
           senderKey: record['senderKey'] as String?,
+          replyToId: record['replyToId'] as String?,
+          replyToText: record['replyToText'] as String?,
+          replyToSenderKey: record['replyToSenderKey'] as String?,
+          replyToIsMedia: record['replyToIsMedia'] == true,
+          replyToMediaType: record['replyToMediaType'] as String?,
         )..isRead = record['isRead'] == true,
       );
     }
@@ -1788,6 +1970,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _selectedPeer = p;
       _isMobileSidebarExpanded = false;
       _autoScroll = true;
+      // Bubble keys and any in-flight highlight belong to whichever chat
+      // was previously open - stale entries would otherwise pile up
+      // forever and could momentarily point `Scrollable.ensureVisible` at
+      // a widget from the chat we just left.
+      _messageBubbleKeys.clear();
+      _highlightedMessageId = null;
+      _replyingTo = null;
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1869,16 +2058,16 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   /// Toggles my own reaction with [emoji] on [message]: adds it if I
   /// haven't reacted with it yet, removes it if I have. Used by the
   /// double-tap "thumbs up" shortcut, the reaction picker dialog, and
-  /// tapping an existing reaction bubble to un-react.
+  /// tapping an existing reaction bubble to un-react. Works the same way
+  /// for a group chat as a 1:1 one - the reaction map itself was always
+  /// group-shaped (emoji -> set of reactor keys), the only thing that
+  /// changes is fanning the update out to every member instead of sending
+  /// it to a single peer.
   Future<void> _toggleReaction(ChatMessage message, String emoji) async {
     if (_selectedPeer == null) return;
-    // Saved Messages is a local notebook with nobody else to react - keep
-    // reactions scoped to real peer conversations only. Groups aren't
-    // wired up for reactions yet either (same reasoning as read receipts
-    // above - fanning a reaction update out to every member is future
-    // work, not included in this first pass).
-    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey ||
-        _selectedPeer!.isGroup) {
+    // Saved Messages is a local notebook with nobody else to react to -
+    // keep reactions scoped to real conversations (1:1 or group) only.
+    if (_selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey) {
       return;
     }
 
@@ -1904,7 +2093,27 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       reactions: message.reactions,
     );
 
-    _sessionManager?.sendReactionUpdate(targetKey, message.id, emoji, isAdd);
+    if (peer.isGroup) {
+      final failedMembers = await _sessionManager?.sendGroupReactionUpdate(
+        memberKeys: peer.groupMemberKeys,
+        groupId: targetKey,
+        messageId: message.id,
+        emoji: emoji,
+        isAdd: isAdd,
+      );
+      if ((failedMembers?.isNotEmpty ?? false) && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Reaction not delivered to ${failedMembers!.length} of '
+              '${peer.groupMemberKeys.length} group members.',
+            ),
+          ),
+        );
+      }
+    } else {
+      _sessionManager?.sendReactionUpdate(targetKey, message.id, emoji, isAdd);
+    }
   }
 
   void _showDynamicContextMenu(
@@ -1926,7 +2135,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         Offset.zero & overlay.size,
       ),
       items: [
-        if (!isSavedMessagesChat && !isGroupChat)
+        if (!isSavedMessagesChat)
           const PopupMenuItem(
             value: 'react',
             child: Row(
@@ -1941,6 +2150,16 @@ class _DecentralizedChatState extends State<DecentralizedChat>
               ],
             ),
           ),
+        const PopupMenuItem(
+          value: 'reply',
+          child: Row(
+            children: [
+              Icon(Icons.reply_rounded, size: 16, color: Colors.white70),
+              SizedBox(width: 10),
+              Text('Reply'),
+            ],
+          ),
+        ),
         const PopupMenuItem(
           value: 'copy',
           child: Row(
@@ -1999,6 +2218,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           context: context,
           onSelected: (emoji) => _toggleReaction(message, emoji),
         );
+      } else if (selectedValue == 'reply') {
+        _startReply(message);
       } else if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2287,6 +2508,144 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         : rawPublicKey;
   }
 
+  /// Returns (creating if necessary) the [GlobalKey] a message bubble is
+  /// built with, so a quoted-reply tap can later locate its render object
+  /// via [Scrollable.ensureVisible].
+  GlobalKey _keyForMessage(String id) =>
+      _messageBubbleKeys.putIfAbsent(id, () => GlobalKey());
+
+  /// Stages [m] as the message a new outgoing message will reply to -
+  /// shows the compose-bar preview and focuses the input. Works exactly
+  /// the same for a group chat as a 1:1 one: what actually travels on the
+  /// wire is just [ChatMessage.senderKey]/[ChatMessage.isMe], which are
+  /// already resolved per-chat-type.
+  void _startReply(ChatMessage m) {
+    setState(() => _replyingTo = m);
+    _msgFocusNode.requestFocus();
+  }
+
+  void _cancelReply() => setState(() => _replyingTo = null);
+
+  /// The raw public key of whoever actually sent [m], from the current
+  /// chat's point of view - `myRawPublicKey` if I sent it, otherwise
+  /// either its `senderKey` (group chats) or the open peer's key (1:1
+  /// chats, which never populate `senderKey` on inbound messages).
+  String? _originalSenderKeyFor(ChatMessage m) {
+    if (m.isMe) return _myRawPublicKey;
+    return m.senderKey ?? _selectedPeer?.rawPublicKey.trim();
+  }
+
+  /// Short human label for who a reply-in-progress or reply-quote is
+  /// pointing at: "You" for my own messages, otherwise the usual
+  /// nickname/short-id resolution.
+  String _authorLabelFor(String? rawPublicKey) {
+    if (rawPublicKey == null) return 'Unknown';
+    return _displayNameFor(rawPublicKey);
+  }
+
+  /// The one-line snippet shown both in the compose-bar reply preview and
+  /// (as a snapshot baked into the outgoing payload) in the recipient's
+  /// quoted-reply block: the message's own text if it has any, otherwise
+  /// a fallback label for its attachment type.
+  String _replyPreviewText(ChatMessage m) {
+    if (m.text.trim().isNotEmpty) return m.text;
+    if (m.isMedia) return _mediaReplyLabel(m.mediaType);
+    return '';
+  }
+
+  String _mediaReplyLabel(String? mediaType) {
+    switch (mediaType) {
+      case 'image':
+        return '📷 Photo';
+      case 'video':
+        return '🎞️ Video';
+      case 'audio':
+        return '🎵 Audio';
+      default:
+        return '📄 Document';
+    }
+  }
+
+  /// Scrolls the original message a reply is quoting into view and briefly
+  /// flashes its background, exactly like tapping a reply quote does in
+  /// Telegram/WhatsApp. If the original isn't currently rendered (deleted,
+  /// or simply hasn't loaded), this fails quietly with a toast instead of
+  /// throwing.
+  void _scrollToAndHighlightMessage(String messageId) {
+    final ctx = _messageBubbleKeys[messageId]?.currentContext;
+    if (ctx == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Original message not available.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    Scrollable.ensureVisible(
+      ctx,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+      alignment: 0.5,
+    );
+
+    _highlightClearTimer?.cancel();
+    setState(() => _highlightedMessageId = messageId);
+    _highlightClearTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) setState(() => _highlightedMessageId = null);
+    });
+  }
+
+  /// The small quoted block shown at the top of a reply's bubble - author
+  /// label plus a one-line snippet of whatever it's replying to, using the
+  /// snapshot carried in the payload so it still renders even if the
+  /// original was since deleted locally. Tapping it jumps to (and briefly
+  /// highlights) the original message if it's still around.
+  Widget _buildReplyQuote(ChatMessage m, BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final String authorLabel = _authorLabelFor(m.replyToSenderKey);
+    final String snippet = (m.replyToText?.trim().isNotEmpty ?? false)
+        ? m.replyToText!.trim()
+        : (m.replyToIsMedia ? _mediaReplyLabel(m.replyToMediaType) : '');
+
+    return GestureDetector(
+      onTap: () => _scrollToAndHighlightMessage(m.replyToId!),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black26,
+          borderRadius: BorderRadius.circular(6),
+          border: Border(
+            left: BorderSide(color: theme.colorScheme.primary, width: 3),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              authorLabel,
+              style: TextStyle(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+            ),
+            if (snippet.isNotEmpty)
+              Text(
+                snippet,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white60, fontSize: 12),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
 Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final String timeString =
@@ -2295,9 +2654,18 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     final bool isSavedMessagesChat =
         _selectedPeer?.rawPublicKey == StorageService.savedMessagesPeerKey;
     final bool isGroupChat = _selectedPeer?.isGroup ?? false;
-    final bool reactionsDisabled = isSavedMessagesChat || isGroupChat;
+    // Saved Messages is a local notebook with nobody else to react - every
+    // other chat (1:1 or group) supports reactions.
+    final bool reactionsDisabled = isSavedMessagesChat;
 
-    return Align(
+    return KeyedSubtree(
+      key: _keyForMessage(m.id),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        color: _highlightedMessageId == m.id
+            ? theme.colorScheme.primary.withValues(alpha: 0.12)
+            : Colors.transparent,
+        child: Align(
       alignment: m.isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: TweenAnimationBuilder<double>(
         key: ValueKey(m.id),
@@ -2330,7 +2698,9 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   ),
                 ),
               ),
-            GestureDetector(
+            SwipeToReply(
+              onReply: () => _startReply(m),
+              child: GestureDetector(
               onTapDown: (details) => tapDetails = details,
               onSecondaryTapDown: (details) {
                 tapDetails = details;
@@ -2362,6 +2732,8 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (m.replyToId != null)
+                      _buildReplyQuote(m, context),
                     if (m.isMedia) ...[
                       _buildInteractiveMediaContent(m),
                       if (m.text.trim().isNotEmpty) const SizedBox(height: 8),
@@ -2403,6 +2775,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                 ),
               ),
             ),
+            ),
             if (m.reactions.isNotEmpty) _buildReactionsRow(m, context),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -2430,6 +2803,8 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               ),
             ),
           ],
+        ),
+      ),
         ),
       ),
     );
@@ -2517,11 +2892,14 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
   /// reaction chips look consistent with the rest of the app.
   Widget _buildReactorAvatar(String reactorKey, ThemeData theme) {
     final bool isSelf = reactorKey == _myRawPublicKey;
+    // _displayNameFor already knows how to resolve any group member (or a
+    // 1:1 peer) to a nickname, with a short-ID fallback - reused here
+    // instead of assuming the reactor is always the currently selected
+    // peer, which only held for 1:1 chats.
+    final String otherName = _displayNameFor(reactorKey);
     final String label = isSelf
         ? 'Y'
-        : (_selectedPeer != null && _selectedPeer!.nickname.isNotEmpty
-              ? _selectedPeer!.nickname[0].toUpperCase()
-              : '?');
+        : (otherName.isNotEmpty ? otherName[0].toUpperCase() : '?');
 
     return Container(
       width: 16,
@@ -2744,39 +3122,100 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
     final ThemeData theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.all(24.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_replyingTo != null) _buildReplyComposerPreview(context),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _msgController,
+                  focusNode: _msgFocusNode,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => _sendMessage(),
+                  decoration: InputDecoration(
+                    hintText: 'Message...',
+                    filled: true,
+                    fillColor: const Color(0xFF1E1E1E),
+                    prefixIcon: IconButton(
+                      onPressed: _pickAndSendMedia,
+                      icon: Icon(
+                        Icons.add_circle_outline_rounded,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+                    border: const OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(16)),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              FloatingActionButton(
+                backgroundColor: _isMessageEmpty
+                    ? Colors.white30
+                    : theme.colorScheme.primary,
+                onPressed: _isMessageEmpty ? null : _sendMessage,
+                child: const Icon(Icons.send_rounded, color: Colors.black),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The small strip shown right above the input field once a reply's been
+  /// staged (via swipe or the context menu) - author + snippet of what's
+  /// being replied to, with an "X" to cancel back to a normal message.
+  Widget _buildReplyComposerPreview(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ChatMessage replyingTo = _replyingTo!;
+    final String authorLabel =
+        replyingTo.isMe ? 'yourself' : _authorLabelFor(_originalSenderKeyFor(replyingTo));
+    final String snippet = _replyPreviewText(replyingTo);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(12),
+        border: Border(
+          left: BorderSide(color: theme.colorScheme.primary, width: 3),
+        ),
+      ),
       child: Row(
         children: [
           Expanded(
-            child: TextField(
-              controller: _msgController,
-              focusNode: _msgFocusNode,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _sendMessage(),
-              decoration: InputDecoration(
-                hintText: 'Message...',
-                filled: true,
-                fillColor: const Color(0xFF1E1E1E),
-                prefixIcon: IconButton(
-                  onPressed: _pickAndSendMedia,
-                  icon: Icon(
-                    Icons.add_circle_outline_rounded,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Replying to $authorLabel',
+                  style: TextStyle(
                     color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
                   ),
                 ),
-                border: const OutlineInputBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(16)),
-                  borderSide: BorderSide.none,
-                ),
-              ),
+                if (snippet.isNotEmpty)
+                  Text(
+                    snippet,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white60, fontSize: 12),
+                  ),
+              ],
             ),
           ),
-          const SizedBox(width: 12),
-          FloatingActionButton(
-            backgroundColor: _isMessageEmpty
-                ? Colors.white30
-                : theme.colorScheme.primary,
-            onPressed: _isMessageEmpty ? null : _sendMessage,
-            child: const Icon(Icons.send_rounded, color: Colors.black),
+          IconButton(
+            icon: const Icon(Icons.close_rounded, size: 18, color: Colors.white60),
+            onPressed: _cancelReply,
+            tooltip: 'Cancel reply',
           ),
         ],
       ),

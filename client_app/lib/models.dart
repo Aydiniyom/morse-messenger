@@ -32,6 +32,34 @@ class ChatMessage {
 
   final String? senderKey;
 
+  /// The id of the message this one is replying to, or null if it isn't a
+  /// reply. Set once at construction and never mutated afterward, same as
+  /// [id] - a reply always points at whatever message was selected at the
+  /// moment "Reply" was tapped/swiped.
+  final String? replyToId;
+
+  /// A snapshot of the replied-to message's preview text, captured at
+  /// reply time and carried in the wire payload itself (see
+  /// `ChatSessionManager.sendChatMessage`). This means the quoted preview
+  /// still renders correctly even if the original message is later
+  /// deleted locally, or hasn't arrived/synced yet on this device.
+  final String? replyToText;
+
+  /// The raw public key of whoever originally sent the replied-to message.
+  /// Comparing this against the viewer's own key (same pattern as
+  /// [senderKey]) is enough to label the quote "You" vs. someone else's
+  /// name, for both 1:1 and group chats.
+  final String? replyToSenderKey;
+
+  /// Whether the replied-to message was a media attachment, so the quoted
+  /// preview can fall back to a "📷 Photo"-style label when there was no
+  /// caption text to show.
+  final bool replyToIsMedia;
+
+  /// The replied-to message's media type ('image'/'video'/'audio'/
+  /// 'document'), used only to pick the right fallback label above.
+  final String? replyToMediaType;
+
   /// For a group message I sent (`isMe == true` on a group chat), the raw
   /// public keys of every other member who has sent back a read receipt
   /// for it. A group has more than one "other side", so unlike a 1:1 chat
@@ -60,6 +88,11 @@ class ChatMessage {
     Map<String, Set<String>>? reactions,
     this.senderKey,
     Set<String>? readByKeys,
+    this.replyToId,
+    this.replyToText,
+    this.replyToSenderKey,
+    this.replyToIsMedia = false,
+    this.replyToMediaType,
   }) : timestamp = customTime ?? DateTime.now(),
        isRead = false,
        reactions = reactions ?? {},

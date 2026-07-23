@@ -64,6 +64,19 @@ class ChatSessionManager {
   final void Function(String senderKey, String groupId, String msgId)
   onGroupReadReceiptReceived;
 
+  /// Fires when a group member adds or removes a reaction on a group
+  /// message (mine or another member's). Mirrors [onReactionReceived],
+  /// just scoped to a group and fanned out to every member the same way
+  /// [sendGroupReactionUpdate] sends it.
+  final void Function(
+    String senderKey,
+    String groupId,
+    String msgId,
+    String emoji,
+    bool isAdd,
+  )
+  onGroupReactionReceived;
+
   /// Fires when a group member tells us to remove one of their messages
   /// (or one of ours) from a group's history - "delete for everyone",
   /// same idea as [onMessageDeleted] but scoped to a group.
@@ -146,6 +159,7 @@ class ChatSessionManager {
     required this.onReactionReceived,
     required this.onGroupMessageReceived,
     required this.onGroupReadReceiptReceived,
+    required this.onGroupReactionReceived,
     required this.onGroupMessageDeleted,
     required this.onGroupJoinRequestReceived,
     required this.onGroupJoinAccepted,
@@ -767,11 +781,65 @@ class ChatSessionManager {
     }
   }
 
+  /// Like [sendReactionUpdate], but fans the update out to every member of
+  /// a group - same "no group packet on the wire" pattern as
+  /// [sendGroupMessage] and [sendGroupDeleteNotice]. One member's copy
+  /// failing doesn't stop delivery to the rest.
+  ///
+  /// Returns the raw public keys of any members delivery failed for
+  /// (empty if everyone got it).
+  Future<List<String>> sendGroupReactionUpdate({
+    required List<String> memberKeys,
+    required String groupId,
+    required String messageId,
+    required String emoji,
+    required bool isAdd,
+  }) async {
+    final List<String> failedMembers = [];
+
+    for (final memberKey in memberKeys) {
+      try {
+        final recipient = RSAPublicKey.fromString(memberKey.trim());
+        final plaintext = jsonEncode({
+          'isReaction': true,
+          'isGroupMessage': true,
+          'groupId': groupId,
+          'msgId': messageId,
+          'emoji': emoji,
+          'isAdd': isAdd,
+        });
+        final envelope = CryptoService.encryptEnvelope(
+          plaintext: plaintext,
+          recipientPublicKey: recipient,
+          senderPrivateKey: privKey,
+        );
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to deliver group reaction update to a member: $e');
+        failedMembers.add(memberKey);
+      }
+    }
+
+    return failedMembers;
+  }
+
   Future<void> sendChatMessage({
     required String targetKey,
     required String text,
     required String msgId,
     required DateTime timestamp,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderKey,
+    bool replyToIsMedia = false,
+    String? replyToMediaType,
   }) async {
     final recipient = RSAPublicKey.fromString(targetKey.trim());
     final plaintext = jsonEncode({
@@ -780,6 +848,13 @@ class ChatSessionManager {
       'text': text,
       'msgId': msgId,
       'timestamp': timestamp.toIso8601String(),
+      if (replyToId != null) ...{
+        'replyToId': replyToId,
+        'replyToText': replyToText,
+        'replyToSenderKey': replyToSenderKey,
+        'replyToIsMedia': replyToIsMedia,
+        'replyToMediaType': replyToMediaType,
+      },
     });
 
     final envelope = CryptoService.encryptEnvelope(
@@ -825,6 +900,11 @@ class ChatSessionManager {
     required String fileName,
     required Uint8List rawBytes,
     void Function(double progress)? onProgress,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderKey,
+    bool replyToIsMedia = false,
+    String? replyToMediaType,
   }) async {
     onProgress?.call(0.05);
 
@@ -850,6 +930,13 @@ class ChatSessionManager {
       'mediaId': mediaId,
       'mediaKey': material.keyBase64,
       'mediaIv': material.ivBase64,
+      if (replyToId != null) ...{
+        'replyToId': replyToId,
+        'replyToText': replyToText,
+        'replyToSenderKey': replyToSenderKey,
+        'replyToIsMedia': replyToIsMedia,
+        'replyToMediaType': replyToMediaType,
+      },
     });
 
     final envelope = await CryptoService.encryptEnvelopeInBackground(
@@ -892,6 +979,11 @@ class ChatSessionManager {
     required String text,
     required String msgId,
     required DateTime timestamp,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderKey,
+    bool replyToIsMedia = false,
+    String? replyToMediaType,
   }) async {
     final plaintext = jsonEncode({
       'isReceipt': false,
@@ -901,6 +993,13 @@ class ChatSessionManager {
       'text': text,
       'msgId': msgId,
       'timestamp': timestamp.toIso8601String(),
+      if (replyToId != null) ...{
+        'replyToId': replyToId,
+        'replyToText': replyToText,
+        'replyToSenderKey': replyToSenderKey,
+        'replyToIsMedia': replyToIsMedia,
+        'replyToMediaType': replyToMediaType,
+      },
     });
 
     final List<String> failedMembers = [];
@@ -953,6 +1052,11 @@ class ChatSessionManager {
     required String fileName,
     required Uint8List rawBytes,
     void Function(double progress)? onProgress,
+    String? replyToId,
+    String? replyToText,
+    String? replyToSenderKey,
+    bool replyToIsMedia = false,
+    String? replyToMediaType,
   }) async {
     onProgress?.call(0.05);
 
@@ -984,6 +1088,13 @@ class ChatSessionManager {
           'mediaId': mediaId,
           'mediaKey': material.keyBase64,
           'mediaIv': material.ivBase64,
+          if (replyToId != null) ...{
+            'replyToId': replyToId,
+            'replyToText': replyToText,
+            'replyToSenderKey': replyToSenderKey,
+            'replyToIsMedia': replyToIsMedia,
+            'replyToMediaType': replyToMediaType,
+          },
         });
 
         final envelope = await CryptoService.encryptEnvelopeInBackground(
@@ -1199,13 +1310,13 @@ class ChatSessionManager {
       return;
     }
 
-    // Group text/media messages, deletes, and receipts all set
+    // Group text/media messages, deletes, receipts, and reactions all set
     // `isGroupMessage: true` - a plain chat message routes to
-    // [onGroupMessageReceived], while a delete/receipt that also carries
-    // `groupId` routes to its group-scoped counterpart instead of the 1:1
-    // one below. Checked in this order so a group delete/receipt (which
-    // also sets `isDelete`/`isReceipt`) doesn't fall through to the 1:1
-    // handlers.
+    // [onGroupMessageReceived], while a delete/receipt/reaction that also
+    // carries `groupId` routes to its group-scoped counterpart instead of
+    // the 1:1 one below. Checked in this order so a group delete/receipt/
+    // reaction (which also sets `isDelete`/`isReceipt`/`isReaction`)
+    // doesn't fall through to the 1:1 handlers.
     if (payloadMap['isGroupMessage'] == true) {
       final groupId = payloadMap['groupId'];
       if (groupId is! String) return;
@@ -1222,6 +1333,16 @@ class ChatSessionManager {
         final msgId = payloadMap['msgId'];
         if (msgId is String) {
           onGroupReadReceiptReceived(packet.fromUser, groupId, msgId);
+        }
+        return;
+      }
+
+      if (payloadMap['isReaction'] == true) {
+        final msgId = payloadMap['msgId'];
+        final emoji = payloadMap['emoji'];
+        final isAdd = payloadMap['isAdd'];
+        if (msgId is String && emoji is String && isAdd is bool) {
+          onGroupReactionReceived(packet.fromUser, groupId, msgId, emoji, isAdd);
         }
         return;
       }
