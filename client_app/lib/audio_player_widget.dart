@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/widgets.dart';
 
 class AudioPlayerWidget extends StatefulWidget {
   final File file;

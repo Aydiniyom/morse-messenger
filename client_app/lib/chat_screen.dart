@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'package:client_app/notification_service.dart';
 import 'package:client_app/rounded_divider.dart';
 import 'package:flutter/material.dart';
