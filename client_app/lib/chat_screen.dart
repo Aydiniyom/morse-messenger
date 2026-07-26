@@ -13,6 +13,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'audio_player_widget.dart';
 import 'image_preview_widget.dart';
+import 'mention_popup.dart';
+import 'mention_utils.dart';
 import 'models.dart';
 import 'dialogs.dart';
 import 'storage_service.dart';
@@ -22,6 +24,16 @@ import 'compact_sidebar.dart';
 import 'chat_session_manager.dart';
 import 'video_player_widget.dart';
 import 'swipe_to_reply.dart';
+
+/// One `@mention` the user has inserted into the compose field but hasn't
+/// sent yet - the friendly text currently sitting in the field, plus the
+/// raw public key it actually refers to.
+class _ComposedMention {
+  final String displayText;
+  final String publicKey;
+
+  const _ComposedMention({required this.displayText, required this.publicKey});
+}
 
 class DecentralizedChat extends StatefulWidget {
   const DecentralizedChat({super.key});
@@ -99,6 +111,23 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   String? _highlightedMessageId;
   Timer? _highlightClearTimer;
 
+  /// Group members currently matching an in-progress `@query` in the
+  /// compose field - non-empty exactly when the mention popup should be
+  /// showing. Recomputed on every keystroke by [_handleComposeTextChanged].
+  List<ChatPeer> _mentionCandidates = [];
+
+  /// Index (into [_msgController]'s text) of the `@` that started the
+  /// mention query currently being typed, or null if there isn't one.
+  int? _mentionQueryStart;
+
+  /// Every `@mention` inserted via the popup in the message currently
+  /// being composed, in the order they were inserted. [_sendMessage]
+  /// consumes this list to splice each one's real [MentionUtils] token
+  /// into the outgoing text right before sending - the compose field
+  /// itself only ever shows the friendly "@Nickname" text, never the raw
+  /// token.
+  final List<_ComposedMention> _composedMentions = [];
+
   @override
   void initState() {
     super.initState();
@@ -113,6 +142,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           _isMessageEmpty = isEmpty;
         });
       }
+      _handleComposeTextChanged();
     });
   }
 
@@ -470,10 +500,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         });
 
         if (!isChatOpenAndVisible) {
+          final bool mentionsMe = MentionUtils.extractMentionedKeys(text)
+              .contains(_myRawPublicKey);
           NotificationService.showNotification(
             id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-            title: group.nickname,
-            body: text,
+            title: mentionsMe
+                ? '${_displayNameFor(cleanedSenderKey)} mentioned you in ${group.nickname}'
+                : group.nickname,
+            body: MentionUtils.stripMentionsToPlainText(text, _displayNameFor),
           );
         }
 
@@ -957,7 +991,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       NotificationService.showNotification(
         id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
         title: "New Message from ${sender.nickname}",
-        body: incomingMsg.text,
+        body: MentionUtils.stripMentionsToPlainText(
+          incomingMsg.text,
+          _displayNameFor,
+        ),
       );
     }
 
@@ -1753,7 +1790,21 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       return;
     }
 
-    final text = _msgController.text;
+    // Swap each friendly "@Nickname" the mention popup inserted for the
+    // real MentionUtils token that actually travels on the wire - the
+    // compose field itself never shows the raw token, only the name.
+    String text = _msgController.text;
+    for (final mention in _composedMentions) {
+      final int idx = text.indexOf(mention.displayText);
+      if (idx == -1) continue; // edited away after insertion - just drop it
+      text = text.replaceRange(
+        idx,
+        idx + mention.displayText.length,
+        MentionUtils.encodeToken(mention.publicKey),
+      );
+    }
+    _composedMentions.clear();
+
     // Snapshot whatever's staged as a reply target *before* any awaits -
     // `_replyingTo` is only cleared once the send actually succeeds (see
     // below), so a failed send followed by the "Retry" action still has
@@ -1976,6 +2027,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _messageBubbleKeys.clear();
       _highlightedMessageId = null;
       _replyingTo = null;
+      _mentionCandidates = [];
+      _mentionQueryStart = null;
+      _composedMentions.clear();
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2525,6 +2579,103 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   void _cancelReply() => setState(() => _replyingTo = null);
 
+  /// Recomputes [_mentionCandidates]/[_mentionQueryStart] from the compose
+  /// field's current text + cursor position. Mentions only make sense in a
+  /// group (a 1:1 chat only ever has one "someone else" to tag), so this
+  /// is a no-op - and clears any stale popup - outside of one.
+  void _handleComposeTextChanged() {
+    if (_selectedPeer == null || !_selectedPeer!.isGroup) {
+      if (_mentionCandidates.isNotEmpty) {
+        setState(() => _mentionCandidates = []);
+      }
+      return;
+    }
+
+    final String text = _msgController.text;
+    final int cursor = _msgController.selection.baseOffset;
+    if (cursor < 0 || cursor > text.length) return;
+
+    // Walk back from the cursor looking for the "@" that opened the
+    // current query - bailing out at the first whitespace, since that
+    // means we're no longer inside an in-progress mention at all.
+    int atIndex = -1;
+    for (int i = cursor - 1; i >= 0; i--) {
+      final String ch = text[i];
+      if (ch == '@') {
+        atIndex = i;
+        break;
+      }
+      if (ch == ' ' || ch == '\n') break;
+    }
+
+    // A bare "@" only starts a mention if it's at the very start of the
+    // message or right after whitespace - otherwise "email@domain" would
+    // trigger the popup too.
+    final bool validTrigger = atIndex != -1 &&
+        (atIndex == 0 || text[atIndex - 1] == ' ' || text[atIndex - 1] == '\n');
+
+    if (!validTrigger) {
+      if (_mentionCandidates.isNotEmpty) {
+        setState(() => _mentionCandidates = []);
+      }
+      _mentionQueryStart = null;
+      return;
+    }
+
+    final String query = text.substring(atIndex + 1, cursor).toLowerCase();
+    final List<ChatPeer> candidates = _selectedPeer!.groupMemberKeys
+        .where((key) => key.trim() != _myRawPublicKey)
+        .map((key) => _peerOrPlaceholderFor(key))
+        .where((peer) => peer.nickname.toLowerCase().contains(query))
+        .toList();
+
+    setState(() {
+      _mentionQueryStart = atIndex;
+      _mentionCandidates = candidates;
+    });
+  }
+
+  /// Resolves a group member's raw public key to a [ChatPeer] to show in
+  /// the mention popup - the real contact entry if they're already saved,
+  /// otherwise a throwaway placeholder whose nickname is just their short
+  /// ID, mirroring the fallback [_displayNameFor] already uses everywhere
+  /// else a group member might not be a saved contact.
+  ChatPeer _peerOrPlaceholderFor(String rawPublicKey) {
+    final trimmed = rawPublicKey.trim();
+    final existing = _peers.where((p) => p.rawPublicKey.trim() == trimmed);
+    if (existing.isNotEmpty) return existing.first;
+    return ChatPeer(rawPublicKey: trimmed, nickname: _displayNameFor(trimmed));
+  }
+
+  /// Inserts a friendly "@Nickname " into the compose field for [peer] in
+  /// place of the in-progress query, and remembers it in
+  /// [_composedMentions] so [_sendMessage] can later swap it for the real
+  /// [MentionUtils] token.
+  void _insertMention(ChatPeer peer) {
+    final int? start = _mentionQueryStart;
+    final int cursor = _msgController.selection.baseOffset;
+    if (start == null || cursor < 0) return;
+
+    final String displayName = _displayNameFor(peer.rawPublicKey.trim());
+    final String mentionText = '@$displayName';
+    final String text = _msgController.text;
+    final String newText =
+        text.replaceRange(start, cursor, '$mentionText ');
+    final int newCursor = start + mentionText.length + 1;
+
+    _msgController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newCursor),
+    );
+
+    _composedMentions.add(
+      _ComposedMention(displayText: mentionText, publicKey: peer.rawPublicKey.trim()),
+    );
+
+    _mentionQueryStart = null;
+    setState(() => _mentionCandidates = []);
+  }
+
   /// The raw public key of whoever actually sent [m], from the current
   /// chat's point of view - `myRawPublicKey` if I sent it, otherwise
   /// either its `senderKey` (group chats) or the open peer's key (1:1
@@ -2547,7 +2698,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   /// quoted-reply block: the message's own text if it has any, otherwise
   /// a fallback label for its attachment type.
   String _replyPreviewText(ChatMessage m) {
-    if (m.text.trim().isNotEmpty) return m.text;
+    if (m.text.trim().isNotEmpty) {
+      return MentionUtils.stripMentionsToPlainText(m.text, _displayNameFor);
+    }
     if (m.isMedia) return _mediaReplyLabel(m.mediaType);
     return '';
   }
@@ -2739,19 +2892,40 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                     ],
                     if (m.text.trim().isNotEmpty)
                     MarkdownBody(
-                      data: m.text,
+                      // Mention tokens are resolved to a display name right
+                      // here, at render time, using *this device's* own
+                      // contacts - so the same stored/received text shows
+                      // each reader their own nickname for whoever was
+                      // tagged, never whatever the sender called them.
+                      data: MentionUtils.renderMentionsAsMarkdown(
+                        m.text,
+                        _displayNameFor,
+                      ),
                       selectable: false,
                       onTapLink: (text, href, title) async {
-                        if (href != null) {
-                          final Uri url = Uri.parse(href);
-                          if (await canLaunchUrl(url)) {
-                            await launchUrl(
-                              url,
-                              mode: LaunchMode.externalApplication,
-                            );
-                          } else {
-                            debugPrint('Could not launch link: $href');
-                          }
+                        if (href == null) return;
+                        if (href.startsWith('mention:')) {
+                          final String key = Uri.decodeComponent(
+                            href.substring('mention:'.length),
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                '${_displayNameFor(key)} - ${key.length > 15 ? key.substring(key.length - 15) : key}',
+                              ),
+                              duration: const Duration(seconds: 2),
+                            ),
+                          );
+                          return;
+                        }
+                        final Uri url = Uri.parse(href);
+                        if (await canLaunchUrl(url)) {
+                          await launchUrl(
+                            url,
+                            mode: LaunchMode.externalApplication,
+                          );
+                        } else {
+                          debugPrint('Could not launch link: $href');
                         }
                       },
                       styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
@@ -3124,6 +3298,12 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (_mentionCandidates.isNotEmpty)
+            MentionPopup(
+              candidates: _mentionCandidates,
+              displayNameFor: _displayNameFor,
+              onSelected: _insertMention,
+            ),
           if (_replyingTo != null) _buildReplyComposerPreview(context),
           Row(
             children: [
