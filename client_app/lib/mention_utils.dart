@@ -27,32 +27,56 @@ class MentionUtils {
     dotAll: true,
   );
 
+  /// The token payload reserved for "@everyone" - `*` can never appear in
+  /// a base64Url-encoded key, so it's unambiguous which kind of token
+  /// we're looking at without needing a second delimiter pair.
+  static const String _everyonePayload = '*';
+
   /// Wraps [rawPublicKey] as an inline mention token to splice into
   /// outgoing message text. Base64-encoding the key keeps the token to a
   /// single line despite PEM keys containing embedded newlines.
   static String encodeToken(String rawPublicKey) =>
       '$_open${base64Url.encode(utf8.encode(rawPublicKey))}$_close';
 
+  /// The token for "mentions every current member of the group" - unlike
+  /// a per-person token, this doesn't need to enumerate the membership at
+  /// all: every recipient already knows they're a member of the group
+  /// they just received this in, so "was I mentioned" is simply "does
+  /// this message contain an everyone-token", no key comparison needed.
+  static String encodeEveryoneToken() => '$_open$_everyonePayload$_close';
+
+  /// Whether [text] contains an "@everyone" mention.
+  static bool mentionsEveryone(String text) {
+    return _tokenPattern
+        .allMatches(text)
+        .any((m) => m.group(1) == _everyonePayload);
+  }
+
   /// Every raw public key mentioned anywhere in [text], in order of
   /// appearance (duplicates included). Used to decide whether a given
   /// person was tagged - e.g. whether to fire a "you were mentioned"
-  /// notification.
+  /// notification. Does not include "@everyone" - check
+  /// [mentionsEveryone] for that separately.
   static List<String> extractMentionedKeys(String text) {
-    return _tokenPattern.allMatches(text).map((m) {
-      return _decodeGroup(m);
-    }).toList();
+    return _tokenPattern
+        .allMatches(text)
+        .where((m) => m.group(1) != _everyonePayload)
+        .map(_decodeGroup)
+        .toList();
   }
 
   /// Replaces every mention token in [text] with a tappable Markdown link
   /// whose visible label is resolved *locally* via [resolveDisplayName] -
   /// so the exact same stored/received text shows each reader their own
   /// nickname for the tagged person (or their short-ID fallback), never
-  /// whatever the sender happened to call them.
+  /// whatever the sender happened to call them. "@everyone" renders the
+  /// same fixed word for everyone, since there's no name to resolve.
   static String renderMentionsAsMarkdown(
     String text,
     String Function(String rawPublicKey) resolveDisplayName,
   ) {
     return text.replaceAllMapped(_tokenPattern, (m) {
+      if (m.group(1) == _everyonePayload) return '**@everyone**';
       final key = _decodeGroup(m);
       final name = resolveDisplayName(key).replaceAll(']', '');
       return '[@$name](mention:${Uri.encodeComponent(key)})';
@@ -67,6 +91,7 @@ class MentionUtils {
     String Function(String rawPublicKey) resolveDisplayName,
   ) {
     return text.replaceAllMapped(_tokenPattern, (m) {
+      if (m.group(1) == _everyonePayload) return '@everyone';
       return '@${resolveDisplayName(_decodeGroup(m))}';
     });
   }

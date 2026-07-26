@@ -10,13 +10,11 @@ import 'models.dart';
 /// sits above the input field without covering it.
 class MentionPopup extends StatelessWidget {
   final List<ChatPeer> candidates;
-  final String Function(String rawPublicKey) displayNameFor;
   final void Function(ChatPeer candidate) onSelected;
 
   const MentionPopup({
     super.key,
     required this.candidates,
-    required this.displayNameFor,
     required this.onSelected,
   });
 
@@ -43,7 +41,7 @@ class MentionPopup extends StatelessWidget {
         itemCount: shown.length,
         itemBuilder: (context, index) {
           final peer = shown[index];
-          final name = displayNameFor(peer.rawPublicKey.trim());
+          final name = peer.nickname;
           return ListTile(
             dense: true,
             leading: CircleAvatar(

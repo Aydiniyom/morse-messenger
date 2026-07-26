@@ -26,13 +26,19 @@ import 'video_player_widget.dart';
 import 'swipe_to_reply.dart';
 
 /// One `@mention` the user has inserted into the compose field but hasn't
-/// sent yet - the friendly text currently sitting in the field, plus the
-/// raw public key it actually refers to.
+/// sent yet - the friendly text currently sitting in the field, plus
+/// either the raw public key it refers to, or [isEveryone] if it's the
+/// special "@everyone" entry instead of one specific person.
 class _ComposedMention {
   final String displayText;
   final String publicKey;
+  final bool isEveryone;
 
-  const _ComposedMention({required this.displayText, required this.publicKey});
+  const _ComposedMention({
+    required this.displayText,
+    required this.publicKey,
+    this.isEveryone = false,
+  });
 }
 
 class DecentralizedChat extends StatefulWidget {
@@ -127,6 +133,13 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   /// itself only ever shows the friendly "@Nickname" text, never the raw
   /// token.
   final List<_ComposedMention> _composedMentions = [];
+
+  /// Placeholder `rawPublicKey` for the synthetic "everyone" entry shown
+  /// in the mention popup - long enough to survive [ChatPeer]'s
+  /// short-ID computation (which slices the last 15 characters), but
+  /// never collides with a real PEM public key.
+  static const String _everyoneMentionKey =
+      '@__MORSE_MENTION_EVERYONE_SENTINEL__';
 
   @override
   void initState() {
@@ -500,8 +513,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         });
 
         if (!isChatOpenAndVisible) {
-          final bool mentionsMe = MentionUtils.extractMentionedKeys(text)
-              .contains(_myRawPublicKey);
+          final bool mentionsMe = MentionUtils.mentionsEveryone(text) ||
+              MentionUtils.extractMentionedKeys(text).contains(_myRawPublicKey);
           NotificationService.showNotification(
             id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
             title: mentionsMe
@@ -622,8 +635,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     final DateTime now = DateTime.now();
 
     // Send whatever caption the user already typed (if anything) alongside
-    // the attachment, instead of a hardcoded placeholder string.
-    final String caption = _msgController.text.trim();
+    // the attachment, instead of a hardcoded placeholder string. Goes
+    // through the same mention-token substitution as a plain text message
+    // so a caption like "@Reza check this out" doesn't go out as literal
+    // "@Reza" text.
+    final String caption = _consumeComposedMentions().trim();
 
     // Same snapshot-before-clearing approach as `_sendMessage` - captured
     // here (rather than after the tempMessage/setState below) so it can't
@@ -1790,20 +1806,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       return;
     }
 
-    // Swap each friendly "@Nickname" the mention popup inserted for the
-    // real MentionUtils token that actually travels on the wire - the
-    // compose field itself never shows the raw token, only the name.
-    String text = _msgController.text;
-    for (final mention in _composedMentions) {
-      final int idx = text.indexOf(mention.displayText);
-      if (idx == -1) continue; // edited away after insertion - just drop it
-      text = text.replaceRange(
-        idx,
-        idx + mention.displayText.length,
-        MentionUtils.encodeToken(mention.publicKey),
-      );
-    }
-    _composedMentions.clear();
+    // Swap each friendly "@Nickname"/"@everyone" the mention popup
+    // inserted for the real MentionUtils token that actually travels on
+    // the wire - the compose field itself never shows the raw token,
+    // only the name.
+    final String text = _consumeComposedMentions();
 
     // Snapshot whatever's staged as a reply target *before* any awaits -
     // `_replyingTo` is only cleared once the send actually succeeds (see
@@ -2623,11 +2630,20 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
 
     final String query = text.substring(atIndex + 1, cursor).toLowerCase();
-    final List<ChatPeer> candidates = _selectedPeer!.groupMemberKeys
+    final List<ChatPeer> memberCandidates = _selectedPeer!.groupMemberKeys
         .where((key) => key.trim() != _myRawPublicKey)
         .map((key) => _peerOrPlaceholderFor(key))
         .where((peer) => peer.nickname.toLowerCase().contains(query))
         .toList();
+
+    final List<ChatPeer> candidates = [
+      // Offered first, same as Discord/Telegram-style "everyone" entries,
+      // so it's the quickest thing to reach when someone actually wants
+      // to tag the whole group instead of one member.
+      if ('everyone'.contains(query))
+        ChatPeer(rawPublicKey: _everyoneMentionKey, nickname: 'everyone'),
+      ...memberCandidates,
+    ];
 
     setState(() {
       _mentionQueryStart = atIndex;
@@ -2649,15 +2665,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   /// Inserts a friendly "@Nickname " into the compose field for [peer] in
   /// place of the in-progress query, and remembers it in
-  /// [_composedMentions] so [_sendMessage] can later swap it for the real
-  /// [MentionUtils] token.
+  /// [_composedMentions] so [_consumeComposedMentions] can later swap it
+  /// for the real [MentionUtils] token.
   void _insertMention(ChatPeer peer) {
     final int? start = _mentionQueryStart;
     final int cursor = _msgController.selection.baseOffset;
     if (start == null || cursor < 0) return;
 
-    final String displayName = _displayNameFor(peer.rawPublicKey.trim());
-    final String mentionText = '@$displayName';
+    final bool isEveryone = peer.rawPublicKey == _everyoneMentionKey;
+    // Real candidates already carry their resolved display name as their
+    // nickname (see [_peerOrPlaceholderFor]) - no need to re-resolve it.
+    final String mentionText = '@${peer.nickname}';
     final String text = _msgController.text;
     final String newText =
         text.replaceRange(start, cursor, '$mentionText ');
@@ -2669,11 +2687,35 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
 
     _composedMentions.add(
-      _ComposedMention(displayText: mentionText, publicKey: peer.rawPublicKey.trim()),
+      _ComposedMention(
+        displayText: mentionText,
+        publicKey: isEveryone ? '' : peer.rawPublicKey.trim(),
+        isEveryone: isEveryone,
+      ),
     );
 
     _mentionQueryStart = null;
     setState(() => _mentionCandidates = []);
+  }
+
+  /// Swaps every friendly "@Nickname"/"@everyone" the mention popup
+  /// inserted in the compose field for the real [MentionUtils] token that
+  /// actually travels on the wire, and clears the pending list. Shared by
+  /// both the plain-text send path and the media-caption send path, so a
+  /// caption mentions exactly the same way a text message does instead of
+  /// going out as literal "@Name".
+  String _consumeComposedMentions() {
+    String text = _msgController.text;
+    for (final mention in _composedMentions) {
+      final int idx = text.indexOf(mention.displayText);
+      if (idx == -1) continue; // edited away after insertion - just drop it
+      final String token = mention.isEveryone
+          ? MentionUtils.encodeEveryoneToken()
+          : MentionUtils.encodeToken(mention.publicKey);
+      text = text.replaceRange(idx, idx + mention.displayText.length, token);
+    }
+    _composedMentions.clear();
+    return text;
   }
 
   /// The raw public key of whoever actually sent [m], from the current
@@ -3301,7 +3343,6 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
           if (_mentionCandidates.isNotEmpty)
             MentionPopup(
               candidates: _mentionCandidates,
-              displayNameFor: _displayNameFor,
               onSelected: _insertMention,
             ),
           if (_replyingTo != null) _buildReplyComposerPreview(context),
