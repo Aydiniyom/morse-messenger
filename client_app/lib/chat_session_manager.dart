@@ -45,6 +45,14 @@ class ChatSessionManager {
   )
   onReactionReceived;
 
+  /// Fires when the original author of message [msgId] changes its text -
+  /// "edit for everyone", same delivery/authenticity model as
+  /// [onMessageDeleted] (the envelope's verified sender is who's allowed to
+  /// have sent this; whether they were actually the message's original
+  /// author is the caller's job to check, same as delete already is).
+  final void Function(String senderKey, String msgId, String newText)
+  onMessageEdited;
+
   /// Fires for an inbound group message - [senderKey] is whichever member
   /// actually sent it (not necessarily anyone in particular), [groupId]
   /// identifies which group it belongs to, and [payload] is the same
@@ -81,6 +89,16 @@ class ChatSessionManager {
   /// same idea as [onMessageDeleted] but scoped to a group.
   final void Function(String senderKey, String groupId, String msgId)
   onGroupMessageDeleted;
+
+  /// Fires when a group member's message is edited by its original author.
+  /// Mirrors [onMessageEdited], just scoped to a group.
+  final void Function(
+    String senderKey,
+    String groupId,
+    String msgId,
+    String newText,
+  )
+  onGroupMessageEdited;
 
   /// Fires on the group's introducer device when someone asks to join.
   /// [requesterKey] is cryptographically authenticated (it's the envelope's
@@ -155,11 +173,13 @@ class ChatSessionManager {
     required this.onFriendRequestAccepted,
     required this.onStatusUpdateReceived,
     required this.onMessageDeleted,
+    required this.onMessageEdited,
     required this.onReactionReceived,
     required this.onGroupMessageReceived,
     required this.onGroupReadReceiptReceived,
     required this.onGroupReactionReceived,
     required this.onGroupMessageDeleted,
+    required this.onGroupMessageEdited,
     required this.onGroupJoinRequestReceived,
     required this.onGroupJoinAccepted,
     required this.onGroupJoinRejected,
@@ -402,6 +422,37 @@ class ChatSessionManager {
     }
   }
 
+  /// Tells [targetKey] that the message identified by [messageId] now
+  /// reads [newText] - "edit for everyone", same delivery/signing pattern
+  /// as [sendDeleteNotice]. Only the original author should ever call
+  /// this for a given message; there's nothing at the protocol level
+  /// stopping anyone else, so the UI layer is what enforces that.
+  void sendEditNotice(String targetKey, String messageId, String newText) {
+    try {
+      final recipient = RSAPublicKey.fromString(targetKey.trim());
+      final plaintext = jsonEncode({
+        'isEdit': true,
+        'msgId': messageId,
+        'text': newText,
+      });
+      final envelope = CryptoService.encryptEnvelope(
+        plaintext: plaintext,
+        recipientPublicKey: recipient,
+        senderPrivateKey: privKey,
+      );
+      _send(
+        Packet(
+          type: PacketType.message,
+          fromUser: myRawPublicKey,
+          toUser: targetKey.trim(),
+          payload: envelope,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to send edit notice: $e');
+    }
+  }
+
   /// Like [sendReadReceipt], but tags the receipt with [groupId] so the
   /// original sender can track per-message read state across every member
   /// instead of just a single yes/no.
@@ -464,6 +515,44 @@ class ChatSessionManager {
         );
       } catch (e) {
         debugPrint('Failed to send group delete notice to a member: $e');
+      }
+    }
+  }
+
+  /// Fans an edit out to every current group member - same "no group
+  /// packet on the wire, just one 1:1 send per member" pattern as
+  /// [sendGroupDeleteNotice].
+  void sendGroupEditNotice(
+    List<String> memberKeys,
+    String groupId,
+    String messageId,
+    String newText,
+  ) {
+    for (final memberKey in memberKeys) {
+      try {
+        final recipient = RSAPublicKey.fromString(memberKey.trim());
+        final plaintext = jsonEncode({
+          'isEdit': true,
+          'isGroupMessage': true,
+          'groupId': groupId,
+          'msgId': messageId,
+          'text': newText,
+        });
+        final envelope = CryptoService.encryptEnvelope(
+          plaintext: plaintext,
+          recipientPublicKey: recipient,
+          senderPrivateKey: privKey,
+        );
+        _send(
+          Packet(
+            type: PacketType.message,
+            fromUser: myRawPublicKey,
+            toUser: memberKey.trim(),
+            payload: envelope,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Failed to send group edit notice to a member: $e');
       }
     }
   }
@@ -1309,13 +1398,14 @@ class ChatSessionManager {
       return;
     }
 
-    // Group text/media messages, deletes, receipts, and reactions all set
-    // `isGroupMessage: true` - a plain chat message routes to
-    // [onGroupMessageReceived], while a delete/receipt/reaction that also
-    // carries `groupId` routes to its group-scoped counterpart instead of
-    // the 1:1 one below. Checked in this order so a group delete/receipt/
-    // reaction (which also sets `isDelete`/`isReceipt`/`isReaction`)
-    // doesn't fall through to the 1:1 handlers.
+    // Group text/media messages, deletes, edits, receipts, and reactions
+    // all set `isGroupMessage: true` - a plain chat message routes to
+    // [onGroupMessageReceived], while a delete/edit/receipt/reaction that
+    // also carries `groupId` routes to its group-scoped counterpart
+    // instead of the 1:1 one below. Checked in this order so a group
+    // delete/edit/receipt/reaction (which also sets
+    // `isDelete`/`isEdit`/`isReceipt`/`isReaction`) doesn't fall through
+    // to the 1:1 handlers.
     if (payloadMap['isGroupMessage'] == true) {
       final groupId = payloadMap['groupId'];
       if (groupId is! String) return;
@@ -1342,6 +1432,15 @@ class ChatSessionManager {
         final isAdd = payloadMap['isAdd'];
         if (msgId is String && emoji is String && isAdd is bool) {
           onGroupReactionReceived(packet.fromUser, groupId, msgId, emoji, isAdd);
+        }
+        return;
+      }
+
+      if (payloadMap['isEdit'] == true) {
+        final msgId = payloadMap['msgId'];
+        final newText = payloadMap['text'];
+        if (msgId is String && newText is String) {
+          onGroupMessageEdited(packet.fromUser, groupId, msgId, newText);
         }
         return;
       }
@@ -1377,6 +1476,15 @@ class ChatSessionManager {
       final isAdd = payloadMap['isAdd'];
       if (msgId is String && emoji is String && isAdd is bool) {
         onReactionReceived(packet.fromUser, msgId, emoji, isAdd);
+      }
+      return;
+    }
+
+    if (payloadMap['isEdit'] == true) {
+      final msgId = payloadMap['msgId'];
+      final newText = payloadMap['text'];
+      if (msgId is String && newText is String) {
+        onMessageEdited(packet.fromUser, msgId, newText);
       }
       return;
     }

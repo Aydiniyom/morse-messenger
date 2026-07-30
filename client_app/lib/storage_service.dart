@@ -211,6 +211,7 @@ class StorageService {
     required bool isMe,
     required String timestampIso,
     bool? isRead,
+    bool? isEdited,
     String? mediaType,
     String? mediaFileName,
     String? mediaId,
@@ -250,6 +251,7 @@ class StorageService {
         // made every message *I* sent look already "read" by the
         // recipient the instant it was saved.
         'isRead': isRead ?? (existing['isRead'] as bool? ?? false),
+        'isEdited': isEdited ?? (existing['isEdited'] as bool? ?? false),
         'mediaType': mediaType ?? existing['mediaType'],
         'mediaFileName': mediaFileName ?? existing['mediaFileName'],
         'mediaId': mediaId ?? existing['mediaId'],
@@ -430,6 +432,26 @@ class StorageService {
       await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));
     } catch (e) {
       debugPrint('Failed to delete saved message: $e');
+    }
+  }
+
+  /// Updates the text of an already-saved message and marks it edited.
+  /// Like [deleteSavedMessage], this is purely local - Saved Messages has
+  /// no peer to notify of the change. No-op if [msgId] isn't found.
+  static Future<void> editSavedMessage(String msgId, String newText) async {
+    try {
+      final box = _getSettingsBox();
+      final savedHistory = await _readMessageList(box, _savedMessagesDataKey);
+      final index = savedHistory.indexWhere((m) => m['id'] == msgId);
+      if (index == -1) return;
+      savedHistory[index] = {
+        ...savedHistory[index],
+        'payload': newText,
+        'isEdited': true,
+      };
+      await box.put(_savedMessagesDataKey, jsonEncode(savedHistory));
+    } catch (e) {
+      debugPrint('Failed to edit saved message: $e');
     }
   }
 

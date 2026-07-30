@@ -299,6 +299,63 @@ class BackgroundService {
       onGroupJoinAccepted: (_, __, ___, ____) => reloadContacts(),
       onGroupMemberAdded: (_, __) => reloadContacts(),
       onGroupAllowListSyncReceived: (_, __, ___) => reloadContacts(),
+      // Unlike the no-op block below, an edit is worth actually persisting
+      // here even though nothing notifies for it: an edit that arrives
+      // while backgrounded and is silently dropped would otherwise leave
+      // the *old* text sitting in local storage indefinitely, which the
+      // user would see as correct (not just stale) the next time they
+      // open the chat - there's no server-side history to reconcile
+      // against later, so this is the only chance to catch it. Only
+      // applied if we already have the original message locally (so a
+      // malformed/spoofed edit for an unknown id can't inject a bogus
+      // partial record) and only from that message's actual original
+      // author, mirroring the foreground path's authorization check.
+      onMessageEdited: (senderKey, msgId, newText) async {
+        final cleanedSenderKey = senderKey.trim();
+        if (!peerNicknames.containsKey(cleanedSenderKey)) return;
+
+        final history = await StorageService.fetchHistory(cleanedSenderKey);
+        final index = history.indexWhere((m) => m['id'] == msgId);
+        if (index == -1) return;
+        final existing = history[index];
+        if (existing['isMe'] == true) return;
+
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: cleanedSenderKey,
+          msgId: msgId,
+          encryptedPayload: newText,
+          isMe: false,
+          isEdited: true,
+          timestampIso:
+              existing['timestamp'] as String? ?? DateTime.now().toIso8601String(),
+        );
+      },
+      onGroupMessageEdited: (senderKey, groupId, msgId, newText) async {
+        final cleanedSenderKey = senderKey.trim();
+        final members = groupMembers[groupId];
+        if (members == null || !members.contains(cleanedSenderKey)) return;
+
+        final history = await StorageService.fetchHistory(groupId);
+        final index = history.indexWhere((m) => m['id'] == msgId);
+        if (index == -1) return;
+        final existing = history[index];
+        // Same authorization rule as the 1:1 path above: only the
+        // message's original author may edit it for everyone.
+        if (existing['isMe'] == true ||
+            existing['senderKey'] != cleanedSenderKey) {
+          return;
+        }
+
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: groupId,
+          msgId: msgId,
+          encryptedPayload: newText,
+          isMe: false,
+          isEdited: true,
+          timestampIso:
+              existing['timestamp'] as String? ?? DateTime.now().toIso8601String(),
+        );
+      },
       // Everything below only matters for state the visible UI reconciles
       // (read state, reactions, deletes, join-request admin, kicks) - safe
       // to leave as no-ops here since the app re-syncs on next foreground

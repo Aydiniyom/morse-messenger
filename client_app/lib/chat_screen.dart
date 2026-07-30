@@ -106,6 +106,14 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   /// user cancels it.
   ChatMessage? _replyingTo;
 
+  /// The message currently staged for editing, if any - shows the compose-
+  /// bar "Editing message" strip and repurposes the send button/Enter key
+  /// to submit the edit instead of a new message. Mutually exclusive with
+  /// [_replyingTo]: starting one clears the other, since editing a message
+  /// and replying to one are two different things to be doing with the
+  /// compose field at once.
+  ChatMessage? _editingMessage;
+
   /// GlobalKeys for every currently-rendered message bubble, created
   /// lazily as each bubble builds. Lets tapping a quoted-reply block
   /// scroll the original message into view via [Scrollable.ensureVisible]
@@ -321,6 +329,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       onGroupReadReceiptReceived: _handleGroupReadReceipt,
       onGroupReactionReceived: _handleGroupReaction,
       onGroupMessageDeleted: _handleGroupMessageDeleted,
+      onGroupMessageEdited: _handleGroupMessageEdited,
       onGroupJoinRequestReceived: _handleGroupJoinRequest,
       onGroupJoinAccepted: _handleGroupJoinAccepted,
       onGroupJoinRejected: _handleGroupJoinRejected,
@@ -574,6 +583,37 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         StorageService.deleteMessage(
           peerPublicKey: cleanedSenderKey,
           msgId: targetMsgId,
+        );
+      },
+      onMessageEdited: (senderPublicKey, targetMsgId, newText) {
+        final cleanedSenderKey = senderPublicKey.trim();
+        final peerIndex = _peers.indexWhere(
+          (p) => p.rawPublicKey.trim() == cleanedSenderKey,
+        );
+        if (peerIndex == -1) return;
+
+        final peer = _peers[peerIndex];
+        final editedMsgIndex = peer.messages.indexWhere((m) => m.id == targetMsgId);
+        if (editedMsgIndex == -1) return;
+
+        // Same authorization rule as onMessageDeleted above: only the
+        // message's original author may edit it for everyone.
+        final targetMsg = peer.messages[editedMsgIndex];
+        if (targetMsg.isMe) return;
+
+        if (mounted) {
+          setState(() {
+            targetMsg.text = newText;
+            targetMsg.isEdited = true;
+          });
+        }
+        StorageService.persistEncryptedMessage(
+          peerPublicKey: cleanedSenderKey,
+          msgId: targetMsgId,
+          encryptedPayload: newText,
+          isMe: false,
+          isEdited: true,
+          timestampIso: targetMsg.timestamp.toIso8601String(),
         );
       },
     );
@@ -1017,7 +1057,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       // means no notification, full stop.
       NotificationService.showNotification(
         id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-        title: sender.nickname,
+        title: "New Message from ${sender.nickname}",
         body: MentionUtils.stripMentionsToPlainText(
           incomingMsg.text,
           _displayNameFor,
@@ -1802,10 +1842,52 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     StorageService.deleteMessage(peerPublicKey: groupId, msgId: targetMsgId);
   }
 
+  void _handleGroupMessageEdited(
+    String senderPublicKey,
+    String groupId,
+    String targetMsgId,
+    String newText,
+  ) {
+    final groupIndex = _groups.indexWhere((g) => g.rawPublicKey == groupId);
+    if (groupIndex == -1) return;
+
+    final group = _groups[groupIndex];
+    final cleanedSenderKey = senderPublicKey.trim();
+    if (!group.groupMemberKeys.contains(cleanedSenderKey)) return;
+
+    final editedMsgIndex = group.messages.indexWhere((m) => m.id == targetMsgId);
+    if (editedMsgIndex == -1) return;
+
+    final targetMsg = group.messages[editedMsgIndex];
+    // Same authorization rule as _handleGroupMessageDeleted: only the
+    // message's original author may edit it for everyone.
+    if (targetMsg.isMe || targetMsg.senderKey != cleanedSenderKey) return;
+
+    if (mounted) {
+      setState(() {
+        targetMsg.text = newText;
+        targetMsg.isEdited = true;
+      });
+    }
+    StorageService.persistEncryptedMessage(
+      peerPublicKey: groupId,
+      msgId: targetMsgId,
+      encryptedPayload: newText,
+      isMe: false,
+      isEdited: true,
+      timestampIso: targetMsg.timestamp.toIso8601String(),
+    );
+  }
+
   void _sendMessage() async {
     if (_msgController.text.isEmpty ||
         _selectedPeer == null ||
         _sessionManager == null) {
+      return;
+    }
+
+    if (_editingMessage != null) {
+      await _submitEditedMessage();
       return;
     }
 
@@ -1976,6 +2058,82 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     }
   }
 
+  /// Submits whatever's currently in the compose field as an edit to
+  /// [_editingMessage] instead of a new message. Text-only (media messages
+  /// aren't offered "Edit" - see [_showDynamicContextMenu]), so there's no
+  /// media/reply plumbing to redo here, just the text itself.
+  Future<void> _submitEditedMessage() async {
+    final ChatMessage target = _editingMessage!;
+    final String newText = _consumeComposedMentions();
+    final bool isSavedMessagesChat =
+        _selectedPeer!.rawPublicKey == StorageService.savedMessagesPeerKey;
+
+    // Editing to the exact same text isn't worth a wire round-trip or an
+    // "(edited)" tag - just quietly drop back out of edit mode.
+    if (newText == target.text) {
+      _cancelEditing();
+      return;
+    }
+
+    try {
+      if (!isSavedMessagesChat) {
+        final targetKey = _selectedPeer!.rawPublicKey.trim();
+        final bool connected = (_sessionManager?.isServerConnected ?? false) ||
+            await _sessionManager!.waitUntilConnected();
+        if (!connected) {
+          throw const SocketException('No connection to the relay server');
+        }
+
+        if (_selectedPeer!.isGroup) {
+          _sessionManager!.sendGroupEditNotice(
+            _selectedPeer!.groupMemberKeys,
+            targetKey,
+            target.id,
+            newText,
+          );
+        } else {
+          _sessionManager!.sendEditNotice(targetKey, target.id, newText);
+        }
+      }
+
+      if (isSavedMessagesChat) {
+        await StorageService.editSavedMessage(target.id, newText);
+      } else {
+        await StorageService.persistEncryptedMessage(
+          peerPublicKey: _selectedPeer!.rawPublicKey.trim(),
+          msgId: target.id,
+          encryptedPayload: newText,
+          isMe: true,
+          isEdited: true,
+          timestampIso: target.timestamp.toIso8601String(),
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        target.text = newText;
+        target.isEdited = true;
+        _editingMessage = null;
+      });
+      _msgController.clear();
+      _msgFocusNode.requestFocus();
+    } catch (e) {
+      debugPrint('Failed to send edit: $e');
+      final bool isConnectionIssue = e is SocketException || e is StateError;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            isConnectionIssue
+                ? 'No connection to the relay server - edit not sent. Your text is still in the box, try again once reconnected.'
+                : 'Failed to save edit: $e',
+          ),
+          action: SnackBarAction(label: 'Retry', onPressed: _sendMessage),
+        ),
+      );
+    }
+  }
+
   void _scrollToBottom() {
     if (_autoScroll && _scrollController.hasClients) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2033,7 +2191,9 @@ class _DecentralizedChatState extends State<DecentralizedChat>
           replyToSenderKey: record['replyToSenderKey'] as String?,
           replyToIsMedia: record['replyToIsMedia'] == true,
           replyToMediaType: record['replyToMediaType'] as String?,
-        )..isRead = record['isRead'] == true,
+        )
+          ..isRead = record['isRead'] == true
+          ..isEdited = record['isEdited'] == true,
       );
     }
 
@@ -2050,6 +2210,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       _messageBubbleKeys.clear();
       _highlightedMessageId = null;
       _replyingTo = null;
+      _editingMessage = null;
       _mentionCandidates = [];
       _mentionQueryStart = null;
       _composedMentions.clear();
@@ -2246,6 +2407,17 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             ],
           ),
         ),
+        if (message.isMe && !message.isMedia)
+          const PopupMenuItem(
+            value: 'edit',
+            child: Row(
+              children: [
+                Icon(Icons.edit_outlined, size: 16, color: Colors.white70),
+                SizedBox(width: 10),
+                Text('Edit'),
+              ],
+            ),
+          ),
         if (isGroupChat && message.isMe)
           const PopupMenuItem(
             value: 'readBy',
@@ -2296,6 +2468,8 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         );
       } else if (selectedValue == 'reply') {
         _startReply(message);
+      } else if (selectedValue == 'edit') {
+        _startEditingMessage(message);
       } else if (selectedValue == 'copy') {
         Clipboard.setData(ClipboardData(text: message.text));
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2623,6 +2797,49 @@ class _DecentralizedChatState extends State<DecentralizedChat>
   }
 
   void _cancelReply() => setState(() => _replyingTo = null);
+
+  /// Stages [m] for editing: clears any in-progress reply (the two don't
+  /// make sense together), pre-fills the compose field with its current
+  /// text, and focuses the input. Only ever called for a message that's
+  /// already been confirmed editable by the caller (mine, not media) - see
+  /// the 'edit' case in [_showDynamicContextMenu].
+  void _startEditingMessage(ChatMessage m) {
+    // Rebuild _composedMentions to match exactly what the plain-text field
+    // below will contain, in the same "@Name"/"@everyone" shape
+    // [_insertMention] already produces when someone's freshly tagged -
+    // so [_consumeComposedMentions] can re-encode them back into real
+    // tokens on submit exactly like it would for a message typed from
+    // scratch, instead of the edit silently dropping every mention back
+    // down to plain text.
+    _composedMentions.clear();
+    if (MentionUtils.mentionsEveryone(m.text)) {
+      _composedMentions.add(
+        const _ComposedMention(
+          displayText: '@everyone',
+          publicKey: '',
+          isEveryone: true,
+        ),
+      );
+    }
+    for (final key in MentionUtils.extractMentionedKeys(m.text)) {
+      _composedMentions.add(
+        _ComposedMention(displayText: '@${_displayNameFor(key)}', publicKey: key),
+      );
+    }
+
+    setState(() {
+      _replyingTo = null;
+      _editingMessage = m;
+    });
+    _msgController.text = MentionUtils.stripMentionsToPlainText(m.text, _displayNameFor);
+    _msgFocusNode.requestFocus();
+  }
+
+  void _cancelEditing() {
+    setState(() => _editingMessage = null);
+    _msgController.clear();
+    _composedMentions.clear();
+  }
 
   /// Recomputes [_mentionCandidates]/[_mentionQueryStart] from the compose
   /// field's current text + cursor position. Mentions only make sense in a
@@ -3039,6 +3256,14 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                     timeString,
                     style: const TextStyle(color: Colors.white30, fontSize: 11),
                   ),
+                  if (m.isEdited)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 4.0),
+                      child: Text(
+                        '(edited)',
+                        style: TextStyle(color: Colors.white30, fontSize: 11),
+                      ),
+                    ),
                   if (!isSavedMessagesChat && m.isMe)
                     Padding(
                       padding: const EdgeInsets.only(left: 6.0),
@@ -3384,6 +3609,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
               onSelected: _insertMention,
             ),
           if (_replyingTo != null) _buildReplyComposerPreview(context),
+          if (_editingMessage != null) _buildEditComposerPreview(context),
           Row(
             children: [
               Expanded(
@@ -3393,7 +3619,9 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _sendMessage(),
                   decoration: InputDecoration(
-                    hintText: 'Message...',
+                    hintText: _editingMessage != null
+                        ? 'Edit message...'
+                        : 'Message...',
                     filled: true,
                     fillColor: const Color(0xFF1E1E1E),
                     prefixIcon: IconButton(
@@ -3416,9 +3644,56 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                     ? Colors.white30
                     : theme.colorScheme.primary,
                 onPressed: _isMessageEmpty ? null : _sendMessage,
-                child: const Icon(Icons.send_rounded, color: Colors.black),
+                child: Icon(
+                  _editingMessage != null
+                      ? Icons.check_rounded
+                      : Icons.send_rounded,
+                  color: Colors.black,
+                ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The small strip shown right above the input field while a message is
+  /// staged for editing (via the sidebar/bubble "Edit" action) - mirrors
+  /// [_buildReplyComposerPreview]'s look, with an "X" that discards the
+  /// edit and goes back to a normal, empty compose field.
+  Widget _buildEditComposerPreview(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        borderRadius: BorderRadius.circular(12),
+        border: Border(
+          left: BorderSide(color: theme.colorScheme.primary, width: 3),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.edit_outlined, size: 16, color: theme.colorScheme.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Editing message',
+              style: TextStyle(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close_rounded, size: 18, color: Colors.white60),
+            onPressed: _cancelEditing,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
           ),
         ],
       ),

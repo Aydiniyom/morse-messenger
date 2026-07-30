@@ -2,10 +2,18 @@ import 'dart:math';
 
 class ChatMessage {
   final String id;
-  final String text;
+  /// Mutable - unlike most other message fields, an edit updates this in
+  /// place on the same [ChatMessage] instance rather than replacing it,
+  /// same reasoning as [isRead]/[reactions] already being mutable.
+  String text;
   final bool isMe;
   final DateTime timestamp;
   bool isRead;
+
+  /// True once this message has been edited (by me, or - for a message
+  /// someone else sent - by its original author). Purely cosmetic: it just
+  /// drives the "(edited)" label next to the timestamp.
+  bool isEdited;
 
   final String? mediaType;
   final String? mediaFileName;
@@ -85,6 +93,7 @@ class ChatMessage {
     this.isCancelled = false,
     this.downloadFailed = false,
     this.sendFailed = false,
+    this.isEdited = false,
     Map<String, Set<String>>? reactions,
     this.senderKey,
     Set<String>? readByKeys,
