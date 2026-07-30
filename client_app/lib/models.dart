@@ -111,6 +111,14 @@ class ChatPeer {
   List<ChatMessage> messages = [];
   bool isPending;
 
+  /// True if notifications for this contact/group are muted. For a group,
+  /// this doesn't silence it entirely - a message that actually @mentions
+  /// you (or @everyone) still notifies, same as an unmuted group; muting
+  /// only suppresses the "someone posted" notification for messages that
+  /// don't involve you directly. For a DM, muting suppresses notifications
+  /// entirely, since every message in a DM is inherently "about you".
+  bool isMuted;
+
   /// True if this entry represents a group chat rather than a 1:1 contact.
   /// When true, [rawPublicKey] holds the group's locally-generated ID
   /// (not an RSA public key) and [groupMemberKeys] holds the raw public
@@ -145,6 +153,7 @@ class ChatPeer {
     required this.rawPublicKey,
     required this.nickname,
     this.isPending = false,
+    this.isMuted = false,
     this.isGroup = false,
     List<String>? groupMemberKeys,
     List<String>? allowedJoinerKeys,

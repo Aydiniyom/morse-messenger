@@ -240,6 +240,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       return ChatPeer(
         rawPublicKey: data['publicKey']!,
         nickname: data['nickname']!,
+        isMuted: data['muted'] == 'true',
       );
     }).toList();
 
@@ -250,6 +251,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         nickname: data['name'] as String,
         isGroup: true,
         isPending: data['isPending'] == true,
+        isMuted: data['muted'] == true,
         groupMemberKeys: ((data['members'] as List?) ?? const [])
             .cast<String>(),
         allowedJoinerKeys: ((data['allowedJoinerKeys'] as List?) ?? const [])
@@ -515,13 +517,19 @@ class _DecentralizedChatState extends State<DecentralizedChat>
         if (!isChatOpenAndVisible) {
           final bool mentionsMe = MentionUtils.mentionsEveryone(text) ||
               MentionUtils.extractMentionedKeys(text).contains(_myRawPublicKey);
-          NotificationService.showNotification(
-            id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-            title: mentionsMe
-                ? '${_displayNameFor(cleanedSenderKey)} mentioned you in ${group.nickname}'
-                : group.nickname,
-            body: MentionUtils.stripMentionsToPlainText(text, _displayNameFor),
-          );
+          // A muted group still notifies for a message that actually
+          // singles you out (@you or @everyone) - muting only suppresses
+          // the "someone posted" notification for everything else.
+          final bool shouldNotify = !group.isMuted || mentionsMe;
+          if (shouldNotify) {
+            NotificationService.showNotification(
+              id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              title: mentionsMe
+                  ? '${_displayNameFor(cleanedSenderKey)} mentioned you in ${group.nickname}'
+                  : group.nickname,
+              body: MentionUtils.stripMentionsToPlainText(text, _displayNameFor),
+            );
+          }
         }
 
         if (isChatOpenAndVisible) {
@@ -1003,7 +1011,10 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
     if (isChatOpenAndVisible) {
       _sessionManager?.sendReadReceipt(cleanedSenderKey, incomingMsg.id);
-    } else {
+    } else if (!sender.isMuted) {
+      // Unlike a group, every message in a DM is inherently "about you" -
+      // there's no mention-based exception to check, muting a DM just
+      // means no notification, full stop.
       NotificationService.showNotification(
         id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
         title: "New Message from ${sender.nickname}",
@@ -1284,6 +1295,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             'inviteSecret': g.groupInviteSecret,
             'introducerKey': g.groupIntroducerKey,
             'isPending': g.isPending,
+            'muted': g.isMuted,
           },
         )
         .toList();
@@ -1986,7 +1998,11 @@ class _DecentralizedChatState extends State<DecentralizedChat>
 
   void _syncPeersToStorage() async {
     final serialized = _peers
-        .map((p) => {"nickname": p.nickname, "publicKey": p.rawPublicKey})
+        .map((p) => {
+              "nickname": p.nickname,
+              "publicKey": p.rawPublicKey,
+              "muted": p.isMuted.toString(),
+            })
         .toList();
     await StorageService.savePeerList(serialized);
   }
@@ -2405,18 +2421,46 @@ class _DecentralizedChatState extends State<DecentralizedChat>
     );
   }
 
-  /// Shown on long-pressing a contact in either sidebar - lets you copy
-  /// their public key so you can paste it into another group's allow-list
-  /// or the "Add Contact" dialog.
-  void _showPeerKeyMenu(ChatPeer p) {
-    if (p.isGroup || p.rawPublicKey == StorageService.savedMessagesPeerKey) {
+  /// Shown on long-pressing a contact or group in either sidebar. DMs get
+  /// "Info" (copy the contact's public key - this used to be the entire
+  /// menu) and "Mute". Groups get "Modify" (the invite code / allow-list
+  /// editor - this used to only be reachable by holding the chat header
+  /// while that group was open, which meant it wasn't discoverable until
+  /// you'd already selected the group) and "Mute". Not shown for the
+  /// special "Saved Messages" entry, which has nothing to configure.
+  void _showPeerContextMenu(ChatPeer p) {
+    if (p.rawPublicKey == StorageService.savedMessagesPeerKey) {
       return;
     }
-    Dialogs.showPeerKeyDialog(
+
+    Dialogs.showPeerContextMenu(
       context: context,
-      nickname: p.nickname,
-      rawPublicKey: p.rawPublicKey,
+      title: p.nickname,
+      isGroup: p.isGroup,
+      isMuted: p.isMuted,
+      onInfo: p.isGroup
+          ? null
+          : () => Dialogs.showPeerKeyDialog(
+                context: context,
+                nickname: p.nickname,
+                rawPublicKey: p.rawPublicKey,
+              ),
+      onModify: (p.isGroup && !p.isPending) ? () => _showGroupSettings(p) : null,
+      onToggleMute: () => _toggleMute(p),
     );
+  }
+
+  /// Flips a contact's or group's mute state and persists it. See
+  /// [ChatPeer.isMuted] for exactly what muting suppresses for each.
+  void _toggleMute(ChatPeer p) {
+    setState(() {
+      p.isMuted = !p.isMuted;
+    });
+    if (p.isGroup) {
+      _syncGroupsToStorage();
+    } else {
+      _syncPeersToStorage();
+    }
   }
 
   void _showSettingsDialog() {
@@ -2474,31 +2518,25 @@ class _DecentralizedChatState extends State<DecentralizedChat>
             SizedBox(
               height: 73,
               child: Center(
-                child: GestureDetector(
-                  onLongPress:
-                      (_selectedPeer!.isGroup && !_selectedPeer!.isPending)
-                      ? () => _showGroupSettings(_selectedPeer!)
-                      : null,
-                  child: ListTile(
-                    title: Text(
-                      _selectedPeer!.nickname,
-                      style: TextStyle(
-                        color: theme.colorScheme.primary,
-                        fontWeight: FontWeight.bold,
-                      ),
+                child: ListTile(
+                  title: Text(
+                    _selectedPeer!.nickname,
+                    style: TextStyle(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.bold,
                     ),
-                    subtitle: Text(
-                      isSavedMessagesChat
-                          ? 'Save messages here via the right-click / hold menu.'
-                          : _selectedPeer!.isGroup
-                          ? (_selectedPeer!.isPending
-                                ? 'Awaiting approval to join...'
-                                : '${_selectedPeer!.groupMemberKeys.length + 1} members - hold name for settings')
-                          : 'Target: ${_selectedPeer!.shortId}',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                      ),
+                  ),
+                  subtitle: Text(
+                    isSavedMessagesChat
+                        ? 'Save messages here via the right-click / hold menu.'
+                        : _selectedPeer!.isGroup
+                        ? (_selectedPeer!.isPending
+                              ? 'Awaiting approval to join...'
+                              : '${_selectedPeer!.groupMemberKeys.length + 1} members - hold in sidebar for settings')
+                        : 'Target: ${_selectedPeer!.shortId}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
                     ),
                   ),
                 ),
@@ -3478,7 +3516,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                 selectedPeer: _selectedPeer,
                 onlinePeers: _onlinePeers,
                 onSelectPeer: _selectAndLoadPeer,
-                onPeerLongPress: _showPeerKeyMenu,
+                onPeerLongPress: _showPeerContextMenu,
                 onSettingsPressed: _showSettingsDialog,
                 onAboutPressed: () => Dialogs.showAboutDialog(context: context),
                 onIdentityPressed: () => Dialogs.showIdentityModal(
@@ -3539,7 +3577,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                           selectedPeer: _selectedPeer,
                           onlinePeers: _onlinePeers,
                           onSelectPeer: _selectAndLoadPeer,
-                          onPeerLongPress: _showPeerKeyMenu,
+                          onPeerLongPress: _showPeerContextMenu,
                           onSettingsPressed: _showSettingsDialog,
                           onAboutPressed: () =>
                               Dialogs.showAboutDialog(context: context),
@@ -3558,7 +3596,7 @@ Widget _buildMessageBubble(ChatMessage m, BuildContext context) {
                       selectedPeer: _selectedPeer,
                       onlinePeers: _onlinePeers,
                       onSelectPeer: _selectAndLoadPeer,
-                      onPeerLongPress: _showPeerKeyMenu,
+                      onPeerLongPress: _showPeerContextMenu,
                       onMenuPressed: () =>
                           setState(() => _isMobileSidebarExpanded = true),
                     ),

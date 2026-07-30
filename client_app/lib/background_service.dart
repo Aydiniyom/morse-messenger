@@ -117,8 +117,10 @@ class BackgroundService {
     // maps rather than reusing the app's ChatPeer/model classes, since all
     // this needs is "what do I call this key in a notification".
     Map<String, String> peerNicknames = {};
+    Map<String, bool> peerMuted = {};
     Map<String, Set<String>> groupMembers = {};
     Map<String, String> groupNames = {};
+    Map<String, bool> groupMuted = {};
 
     Future<void> reloadContacts() async {
       final peers = await StorageService.fetchPeerList();
@@ -127,6 +129,13 @@ class BackgroundService {
       peerNicknames = {
         for (final p in peers)
           if (p['publicKey'] != null) p['publicKey']!: p['nickname'] ?? '',
+      };
+      // Mirrors chat_screen.dart's serialization: peers are stored as
+      // Map<String, String>, so "muted" travels as the string "true"/
+      // "false" rather than a real bool.
+      peerMuted = {
+        for (final p in peers)
+          if (p['publicKey'] != null) p['publicKey']!: p['muted'] == 'true',
       };
       groupMembers = {
         for (final g in groups)
@@ -137,6 +146,10 @@ class BackgroundService {
       groupNames = {
         for (final g in groups)
           if (g['id'] is String) g['id'] as String: (g['name'] as String?) ?? 'Group chat',
+      };
+      groupMuted = {
+        for (final g in groups)
+          if (g['id'] is String) g['id'] as String: g['muted'] == true,
       };
     }
 
@@ -235,6 +248,10 @@ class BackgroundService {
           payload: payload,
         );
 
+        // Unlike a group, every message in a DM is inherently "about you" -
+        // muting one just means no notification, full stop.
+        if (peerMuted[cleanedSenderKey] == true) return;
+
         final mediaType = payload['mediaType'] as String?;
         notify(
           title: displayNameFor(cleanedSenderKey),
@@ -259,6 +276,14 @@ class BackgroundService {
 
         final mentionsMe = MentionUtils.mentionsEveryone(text) ||
             MentionUtils.extractMentionedKeys(text).contains(myRawPublicKey);
+
+        // A muted group still notifies for a message that actually singles
+        // you out (@you or @everyone) - muting only suppresses the
+        // "someone posted" notification for everything else. Mirrors
+        // chat_screen.dart's identical rule for the foreground path.
+        final bool isMuted = groupMuted[groupId] == true;
+        if (isMuted && !mentionsMe) return;
+
         final groupName = groupNames[groupId] ?? 'Group chat';
         final mediaType = payload['mediaType'] as String?;
 

@@ -843,9 +843,10 @@ class Dialogs {
     );
   }
 
-  /// Opened by long-pressing a group's name in the chat header. Shows the
-  /// group's invite code - always the same value, always copyable, and no
-  /// longer tied to who's currently a member - and lets any current member
+  /// Opened via "Modify" from a group's sidebar context menu (long-press
+  /// the group). Shows the group's invite code - always the same value,
+  /// always copyable, and no longer tied to who's currently a member - and
+  /// lets any current member
   /// extend or shrink the allow-list. The introducer is the sole source of
   /// truth for this list (see chat_screen.dart's allow-list handlers), so
   /// the count shown here is always what the introducer has, not a local
@@ -1043,6 +1044,77 @@ class Dialogs {
             ],
           );
         },
+      ),
+    );
+  }
+
+  /// Opened by long-pressing a contact or group in either sidebar. The
+  /// options shown depend on what kind of entry this is: a DM gets "Info"
+  /// (view/copy the contact's public key) and "Mute"; a group gets
+  /// "Modify" (the invite code / allow-list editor, formerly reached by
+  /// holding the chat header itself - consolidated here for consistency)
+  /// and "Mute". [onInfo] and [onModify] are mutually exclusive in
+  /// practice (only one is ever non-null depending on [isGroup]) and their
+  /// corresponding row is simply omitted when null - e.g. a pending group
+  /// you can't modify yet.
+  static void showPeerContextMenu({
+    required BuildContext context,
+    required String title,
+    required bool isGroup,
+    required bool isMuted,
+    VoidCallback? onInfo,
+    VoidCallback? onModify,
+    required VoidCallback onToggleMute,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: Text(title, style: const TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isGroup && onInfo != null)
+              ListTile(
+                leading: Icon(Icons.info_outline_rounded, color: theme.colorScheme.primary),
+                title: const Text('Info'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onInfo();
+                },
+              ),
+            if (isGroup && onModify != null)
+              ListTile(
+                leading: Icon(Icons.edit_outlined, color: theme.colorScheme.primary),
+                title: const Text('Modify'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onModify();
+                },
+              ),
+            ListTile(
+              leading: Icon(
+                isMuted
+                    ? Icons.notifications_off_rounded
+                    : Icons.notifications_none_rounded,
+                color: theme.colorScheme.primary,
+              ),
+              title: Text(isMuted ? 'Unmute' : 'Mute'),
+              onTap: () {
+                Navigator.pop(ctx);
+                onToggleMute();
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            style: TextButton.styleFrom(overlayColor: Colors.transparent),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+        ],
       ),
     );
   }
