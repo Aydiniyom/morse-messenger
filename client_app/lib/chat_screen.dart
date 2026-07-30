@@ -1017,7 +1017,7 @@ class _DecentralizedChatState extends State<DecentralizedChat>
       // means no notification, full stop.
       NotificationService.showNotification(
         id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-        title: "New Message from ${sender.nickname}",
+        title: sender.nickname,
         body: MentionUtils.stripMentionsToPlainText(
           incomingMsg.text,
           _displayNameFor,
