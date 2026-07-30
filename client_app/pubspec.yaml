@@ -53,6 +53,8 @@ dependencies:
   media_kit_libs_video: ^1.0.7
   audioplayers: ^6.8.1
   path_provider: ^2.1.6
+  flutter_background_service: ^5.0.10
+  flutter_background_service_android: ^6.2.9
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:client_app/notification_service.dart';
 import 'package:flutter/material.dart';
+import 'background_service.dart';
 import 'chat_screen.dart';
 import 'storage_service.dart';
 import 'package:dynamic_color/dynamic_color.dart';
@@ -30,10 +33,39 @@ Future<void> main() async {
 
   useSystemColorNotifier.value = savedUseSystemColor;
 
+  bool notificationsGranted = false;
   try {
-    await NotificationService.initialize();
+    notificationsGranted = await NotificationService.initialize();
   } catch (e) {
     debugPrint('Notification service failed to initialize: $e');
+  }
+
+  // Background connectivity (keeping the relay socket alive and raising
+  // notifications while the app isn't in the foreground) is an
+  // Android-only feature - iOS doesn't permit this kind of long-running
+  // background socket, and if storage itself failed to initialize above
+  // there's no identity/server config to connect with anyway.
+  //
+  // BackgroundService runs as an Android foreground service, which must
+  // post its notification immediately on start via startForeground(). If
+  // notification permission hasn't been granted, Android doesn't silently
+  // hide that notification the way it does for a normal one - it throws
+  // CannotPostForegroundServiceNotificationException and kills the app.
+  // So this only starts once permission is confirmed granted; if the user
+  // grants it later, the service can be (re)started the next time this
+  // check runs (e.g. next app launch, or from a settings screen).
+  if (Platform.isAndroid && startupError == null) {
+    if (notificationsGranted) {
+      try {
+        await BackgroundService.initialize();
+      } catch (e) {
+        debugPrint('Background service failed to initialize: $e');
+      }
+    } else {
+      debugPrint(
+        'Skipping background service start: notification permission not granted.',
+      );
+    }
   }
 
   runApp(MyApp(startupError: startupError));
